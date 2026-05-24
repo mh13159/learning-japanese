@@ -22,20 +22,52 @@
 
 # misc
 .DS_Store
-*.pem
+Thumbs.db
+.windows-build-tools
+.vscode/settings.json
+.idea/
 
-# debug
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/*
+*.swp
+*.swo
+*~
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+lerna-debug.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+.env.production.local
+.env.development.local
 
-# vercel
-.vercel
+# API Keys & Credentials
+.api-keys
+.secrets
+*.key
+*.pem
+*.crt
+*.pfx
+.credentials
+.AI-Agents/**/.env
+.AI-Agents/**/.env.local
+.AI-Agents/**/.credentials
 
-# typescript
+# Build & Dependencies
+node_modules/
+.next/
+dist/
+build/
 *.tsbuildinfo
-next-env.d.ts
+
+# Cache
+.eslintcache
+.turbo/
