@@ -1,467 +1,295 @@
-# Japanese 4-Way Translator / Mapper — Refined Handoff
-## Executive summary
+# Japanese 4-Way Translator — Handoff & Spec
 
-A single-page app that accepts English, Romaji, Japanese (kana/kanji), or audio and produces a canonical set of representations: English, Japanese (Hyōjungo / normalized), kana, romaji, and optional generated audio. The goal is to prioritize pronunciation, transliteration fidelity, and a consistent canonical Japanese form suitable for learners and conversational use.
+> Refined consolidation of the original braindump in [v1japanese_4way_translator_handoff.md](v1japanese_4way_translator_handoff.md). That file is preserved unchanged as the historical ideation source. This file is the working spec.
 
-Key outcomes
-- Accurate orthographic conversions (kanji ⇄ kana ⇄ romaji)
-- Natural, standardized Japanese output (Hyōjungo)
-- High-quality speech input (transcription) and TTS output
-- Lightweight, fast UI for copy and playback
+## 1. Executive summary
 
----
+A single-page app that accepts one of four inputs — **English**, **Romaji**, **Japanese (kana/kanji)**, or **audio** — and produces a unified set of representations: **English**, **Japanese (Hyōjungo / normalized)**, **kana**, **romaji**, and **audio playback**. The product is positioned not as a generic translator but as a **pronunciation and speech companion** for learners, travelers, anime fans, and shadowing practitioners.
 
-## Goals (MVP)
+Key outcomes:
+- Accurate orthographic conversions (kanji ⇄ kana ⇄ romaji), Hepburn by default.
+- Natural, standardized Japanese output (Hyōjungo, Tokyo-standard pronunciation).
+- High-quality speech transcription in, TTS out.
+- Lightweight, fast UI with copy and playback per output.
 
-- Auto-detect input type (English / Romaji / Japanese / Audio)
-- Produce the canonical outputs: english, japanese, kana, romaji, audioUrl?
-- Keep processing deterministic and reversible where practical
-- Use browser TTS for initial audio; support backend TTS later
-
-Non-goals (initial)
-- Offline speech transcription (defer whisper.cpp)
-- Enterprise-grade scalability (MVP is single-region)
+> **Why "4-way" if there are 5 outputs?** The "4" refers to the four **input** types. Outputs are always 5 (English + Japanese + kana + romaji + audio). Future product copy should make this distinction explicit.
 
 ---
 
-## Data contract
+## 2. Reality check — what exists today
 
-Canonical output shape (JSON):
+Treat this section as load-bearing. The docs in this repo (README, CHANGELOG, `.AI-Agents/`) describe an agentic AI framework that **is not implemented**. Before extending the spec, the next contributor should know:
 
-```json
-{
-  "english": "",
-  "japanese": "",
-  "kana": "",
-  "romaji": "",
-  "audioUrl": "optional"
-}
+| Area | Current state | Gap to spec |
+|---|---|---|
+| UI shell | [components/translator.tsx](../components/translator.tsx) renders 4 output cards (English / Japanese / Romaji / Audio) with hardcoded strings | Missing the **kana** card; outputs are a mock |
+| API routes | none — `app/` has only `layout.tsx`, `page.tsx`, `globals.css` | Need `POST /api/translate` per §5 |
+| Provider clients | none; `package.json` previously had a bogus `@nvidia-ai/sdk: latest` placeholder, now removed | All transliteration, translation, speech work is unwritten |
+| `.AI-Agents/` | markdown-only — orchestrator design notes, no code | Convert to real provider clients when wiring begins |
+| Tests | none | See §11 |
+
+The implementation path is codified in [`.claude/skills/wire-provider/SKILL.md`](../.claude/skills/wire-provider/SKILL.md).
+
+---
+
+## 3. Goals & non-goals (MVP)
+
+### In scope (v0)
+- Auto-detect input type (English / Romaji / Japanese / Audio).
+- Produce the canonical 5-field JSON in §4.
+- Deterministic, reversible orthographic conversion where practical.
+- Browser TTS for audio output.
+- Add the missing **kana** card to the UI; reorder so kana sits beside the Japanese card.
+
+### Out of scope (defer)
+- Offline speech transcription (whisper.cpp).
+- Backend TTS providers (Polly / Azure).
+- Pronunciation scoring, pitch-accent visualization, shadowing — all under §13.
+- Multi-region scaling, auth, persistence.
+
+---
+
+## 4. Data contract
+
+Canonical response from `/api/translate`:
+
+```ts
+type Translation = {
+  english: string;              // English rendering
+  japanese: string;             // Hyōjungo, kanji+kana mixed where natural
+  kana: string;                 // hiragana/katakana ONLY — no kanji
+  romaji: string;               // Hepburn by default
+  audioUrl?: string;            // optional; absent when client-side TTS handles playback
+  meta: {
+    detected: "english" | "romaji" | "japanese" | "audio";
+    confidence: number;         // 0..1; if < 0.7, UI shows "ambiguous — review"
+    provider: string;           // e.g. "claude-opus-4-7", "deepl", "kuroshiro"
+    cached: boolean;            // hit on Next.js unstable_cache
+  };
+};
 ```
 
-Validation rules
-- `japanese` must be normalized to Hyōjungo (no casual slang unless requested)
-- `kana` must contain hiragana/katakana only (no kanji)
-- `romaji` should use Hepburn-style by default
+Validation rules:
+- `japanese` must be Hyōjungo (no slang unless requested via a future mode flag).
+- `kana` must contain hiragana/katakana only — reject kanji.
+- `romaji` Hepburn by default. Kunrei is a future opt-in (see §13).
+- `meta.confidence < 0.7` → client must surface alternatives, not just the top result.
 
 ---
 
-## Minimal API surface (Next.js / API routes)
+## 5. API surface (Next.js App Router)
 
-POST /api/convert
-- body: { input: string | null, audioBase64?: string }
-- response: canonical JSON above
+```
+POST /api/translate
+  body: { input: string | null, audioBase64?: string, options?: { romajiStyle?: "hepburn"|"kunrei" } }
+  returns: Translation  (see §4)
 
 GET /api/health
-- simple readiness/liveness
-
-Notes
-- Keep endpoints idempotent; add request-id and caching later for repeated queries.
-
----
-
-## Detection & normalization rules
-
-Input detection (priority):
-1. Audio payload present → audio path (whisper)
-2. Character set detection (kanji/kana) → Japanese
-3. Romaji patterns (common syllables) → Romaji
-4. Fallback → English
-
-Normalization
-- Strip leading/trailing whitespace, normalize punctuation, convert fullwidth ASCII
-- For Japanese inputs, run tokenization then canonicalize readings (use Kuroshiro)
-
-Edge cases
-- Mixed-language inputs: detect dominant language and provide best-effort conversions
-- Ambiguous Romaji: prompt user or return multiple candidate kana/kanji when confidence is low
-
----
-
-## Pipeline (detailed)
-
-1. Input detector
-2. If audio: Whisper → transcript
-3. Normalizer: canonical whitespace/punctuation
-4. Transliteration: japanese ⇄ kana ⇄ romaji (Kuroshiro + Kuromoji)
-5. Translation: DeepL (or fallback) to produce/verify English/JP
-6. TTS: browser speechSynthesis (MVP) or backend TTS (later)
-7. Return canonical JSON and audio URL where available
-
----
-
-## Recommended stack & libs
-
-- Frontend: Next.js, TypeScript, Tailwind CSS, shadcn/ui
-- Transliteration/tokenization: Kuroshiro, Kuromoji.js
-- Translations: DeepL API (MVP), LibreTranslate fallback
-- Speech → Whisper (OpenAI) or whisper.cpp for offline
-- TTS: browser speechSynthesis (MVP), Amazon Polly / Azure TTS later
-
----
-
-## UI mock & UX notes
-
-- Single input area supporting text/audio
-- Output tiles for English, Romaji, Kana, Japanese, and Audio playback
-- Per-output copy and “export as CSV/JSON” buttons
-- Confidence indicator per output; when low, show "ambiguous — review" and list alternatives
-
----
-
-## Acceptance criteria (MVP)
-
-1. A user can paste any one of: English, Romaji, Japanese, or upload short audio, and receive valid canonical JSON.
-2. Kana output is always present and separated from `japanese`.
-3. Romaji follows Hepburn and is consistent across conversions.
-4. Audio playback generated via browser TTS for Japanese output.
-
----
-
-## Milestones & estimates
-
-1. Prototype (UI + transliteration + browser TTS) — 1 day (4–8 hours)
-2. Add translation (DeepL) + normalization — 1 day
-3. Whisper integration (serverless function) + confidence handling — 1 day
-4. Polish (UX, caching, tests) — 1–2 days
-
----
-
-## Testing plan
-
-- Unit tests: transliteration rules, detection heuristics
-- Integration tests: /api/convert happy path with each input type
-- E2E: simulate audio upload → full conversion
-- Add small fixtures with common ambiguous romaji cases
-
----
-
-## Accessibility & performance
-
-- Ensure keyboard access for input and copy buttons
-- Lazy-load heavy libs (Kuromoji) only when needed
-- Use small audio chunks for preview; stream TTS where possible
-
----
-
-## Security & privacy
-
-- When using external APIs (Whisper/DeepL), surface minimal text and avoid storing raw audio unless consented
-- Add privacy notice and clear opt-in for storing audio
-
----
-
-## Dev ergonomics
-
-- Local dev: `pnpm install && pnpm dev` (or `npm`/`yarn` equivalents)
-- Keep transliteration logic in `/lib/transliteration` and translation logic in `/lib/translation`
-
----
-
-## Open questions
-
-1. Preferred romaji standard (Hepburn vs Kunrei)? Default: Hepburn.
-2. Should we attempt kanji disambiguation (show candidates) or only return kana + translation? MVP: show kana + optional kanji candidates.
-3. Do we need offline-first mode for learners? (defer)
-
----
-
-## Next steps (concrete)
-
-1. Create a minimal Next.js app shell with a single `/api/convert` route.
-2. Implement input detection + Kuroshiro transliteration unit tests.
-3. Wire browser TTS for Japanese output and add playback button.
-4. Add Whisper demo integration as a serverless route.
-5. Integrate skills/agents from Agentic AI project (use provided sync script).
-
----
-
-## Files I added for you
-
-- `scripts/sync-copilot-skills.ps1` — PowerShell script to copy `.github/skills` and `.github/agents` from the Agentic AI project into this repo and add a `copilot-instructions.md` if missing.
-- `.github/copilot-instructions.md` — concise project-level Copilot instructions derived from the top rules in this plan.
-
----
-
-If you want, I can also scaffold a minimal Next.js repo and implement the `/api/convert` route and a tiny UI prototype (say "scaffold prototype").
-- Japanese
-- Audio
-into a clean single workflow.
-
-This remains a meaningful niche.
-
----
-
-# Key Product Differentiator
-
-This should NOT be marketed simply as:
-- translator
-
-Better positioning:
-- Japanese speech mapper
-- Japanese pronunciation bridge
-- Romaji-to-real-Japanese assistant
-- Japanese speech companion
-
----
-
-# Future Features
-
-## 1. Romaji Auto Correction
-
-Input:
-```text
-konichiwa
+  returns: { ok: true, version: string }
 ```
 
-Output:
-```text
-konnichiwa
-こんにちは
+Implementation notes:
+- Route handlers live in `app/api/<name>/route.ts`.
+- Wrap the provider call in `unstable_cache` keyed on `(provider, model, normalizedInput, options)`. Default `revalidate: 60 * 60 * 24`.
+- Normalize input via `.normalize("NFKC").trim()` before keying so full-width vs. half-width punctuation does not split the cache.
+- For Claude calls, mark the static system prompt + glossary with `cache_control: { type: "ephemeral" }`. Keep the cached prefix byte-stable.
+
+---
+
+## 6. Detection & normalization
+
+Detection priority (top match wins):
+1. `audioBase64` present → audio path (transcribe with Whisper, restart pipeline on the transcript).
+2. Any character in `぀-ヿ` (hiragana/katakana) or `一-鿿` (kanji) → Japanese.
+3. ASCII-only + matches one of the romaji syllable patterns (`desu`, `ka`, `wa`, `tsu`, `shi`, `kyou`, `ryou`, long-vowel doubles `ou/aa/ee/ii`, sokuon `tt/kk/pp/ss`) → Romaji.
+4. Otherwise → English.
+
+Normalization:
+- Trim, NFKC-normalize, collapse repeated whitespace.
+- Convert full-width ASCII to half-width.
+- For Japanese: tokenize with Kuromoji, then canonicalize readings with Kuroshiro.
+
+Edge cases the v0 must handle:
+- **Mixed-language inputs** (e.g. "I went to Shibuya 駅"): detect dominant script and return best-effort conversions; flag `meta.confidence` low.
+- **Ambiguous Romaji** (e.g. `koukou` could be 高校 or 後攻): return top candidate, expose alternatives via a separate `candidates: string[]` field on the kana/japanese branches when confidence is low.
+
+---
+
+## 7. Pipeline
+
+```
+INPUT
+  │
+  ├─ if audioBase64 → Whisper → transcript
+  │
+  ▼
+Normalize (NFKC, trim, fullwidth→halfwidth)
+  │
+  ▼
+Detect input type ─────────► meta.detected
+  │
+  ▼
+Generate canonical Japanese (translation engine if needed)
+  │
+  ▼
+Derive english / kana / romaji  (Kuroshiro + Kuromoji)
+  │
+  ▼
+TTS (browser speechSynthesis for v0, server-side later)
+  │
+  ▼
+Cache (unstable_cache) → return Translation
 ```
 
 ---
 
-# 2. Anime/Casual → Standard Mode
+## 8. Stack — pin to what's installed
 
-Input:
-```text
-omae nani shiteru
+| Layer | Choice | Why |
+|---|---|---|
+| Framework | **Next.js 16.2.6 (App Router) + React 19.2** — already in [`package.json`](../package.json) | App Router is required; see [`AGENTS.md`](../AGENTS.md) for the breaking-change warning |
+| Language | TypeScript 5 | Already configured |
+| Styling | Tailwind v4 + `tw-animate-css` | Already installed |
+| UI primitives | shadcn/ui (Radix-based) | Full kit already vendored under [`components/ui/`](../components/ui/) |
+| Transliteration | **Kuroshiro** + **Kuromoji.js** | Best-in-class JS option for kana/romaji/furigana; no API cost |
+| Translation | **Claude (Anthropic)** primary, **DeepL** fallback | Claude already in the env via `CLAUDE_API_KEY`; DeepL produces better Japanese than most general models for short phrases |
+| Speech-to-text | OpenAI Whisper API | `OPENAI_API_KEY` already in env |
+| Text-to-speech | `window.speechSynthesis` (v0) → Polly/Azure (v1+) | Zero backend work for v0 |
+
+Do not introduce Redux/RTK Query — server-side `unstable_cache` covers deduplication, and a single-page form does not need a global store.
+
+---
+
+## 9. UI layout
+
+Current UI is 4 cards; v0 spec is 5 cards. Target layout:
+
+```
+┌────────────────────────────────────────────────┐
+│ Input area (textarea + mic button)              │
+└────────────────────────────────────────────────┘
+┌───────────┬───────────┬───────────┬───────────┐
+│ English   │ Japanese  │ Kana      │ Romaji    │
+│ EN        │ 日 (Hyo)  │ かな      │ Aa (Hep)  │
+└───────────┴───────────┴───────────┴───────────┘
+                  Audio playback row (single, full-width)
 ```
 
-Output:
-```text
-お前、何してる？
-```
+Mobile (sm and below): cards stack vertically; audio button sticks to bottom.
 
-Also generate:
-```text
-あなたは何をしていますか？
-```
-
-Explain:
-- masculine
-- informal
-- casual speech
+UI behaviors:
+- Per-card copy button (already implemented for Japanese/Romaji — extend to kana).
+- Loading skeleton on each card while the request is in flight; do not blank existing content.
+- If `meta.confidence < 0.7`, render a yellow "ambiguous — review alternatives" pill on the affected card.
+- Dark mode via `next-themes` (already installed).
 
 ---
 
-# 3. Furigana Layer
+## 10. Acceptance criteria (v0)
 
-Example:
-
-```text
-日本語
-にほんご
-nihongo
-```
+1. User pastes any one of {English, Romaji, Japanese, audio file ≤ 30s} → receives valid `Translation` JSON within 2.5s p95 on cache miss, <300ms on hit.
+2. `kana` field is always present and contains zero kanji codepoints.
+3. `romaji` follows Hepburn and round-trips: `romajiOf(kanaOf(romaji)) === romaji` for a fixture set of 200 syllables.
+4. Browser TTS plays the Japanese output via a single "Play" button.
+5. Reload preserves the last input via `localStorage` (so refreshes don't lose work).
 
 ---
 
-# 4. Accent-Aware Audio
+## 11. Testing plan
 
-Goal:
-- standard Tokyo pronunciation
+| Layer | Tool | Coverage target |
+|---|---|---|
+| Unit | Vitest | Detection heuristics, NFKC normalization, Kuroshiro wrappers, romaji round-trip fixtures (≥ 200 cases) |
+| Integration | Vitest + msw | `/api/translate` happy path for each input type, cache-hit vs. miss |
+| E2E | Playwright | Real browser: type each input type, assert all four cards populate; mock audio upload |
 
----
-
-# 5. Pitch Accent Visualization
-
-Future advanced feature:
-- visualize Japanese pitch accents
-- useful for pronunciation learners
+Fixture data lives in `lib/__fixtures__/` (create when adding tests). Start the test corpus with the 50 most-common JLPT N5 phrases for repeatability.
 
 ---
 
-# 6. Shadowing Practice
+## 12. Non-functional concerns
 
-Features:
-- repeat-after-me playback
-- looping phrases
-- slow playback
-- pronunciation comparison
+### Accessibility
+- Keyboard access for all buttons (Tab → Mic → Cards → Play).
+- `aria-live="polite"` on the output region so screen readers announce results.
+- Color contrast on the "ambiguous" pill must pass WCAG AA.
 
----
+### Performance
+- Lazy-load Kuromoji (dictionary is ~12 MB) on first Japanese input, not on page load.
+- Stream TTS where the platform supports it; otherwise short audio chunks.
+- Avoid re-fetching on identical input — the `unstable_cache` key handles this, but also debounce the client by 300-500ms.
 
-# 7. Pronunciation Scoring
-
-Use:
-- speech recognition similarity
-- phoneme matching
-- syllable timing
-
----
-
-# 8. JLPT Tagging
-
-Tag vocabulary/sentences:
-- N5
-- N4
-- N3
-- N2
-- N1
+### Security & privacy
+- Never store raw audio without explicit consent.
+- API keys live in `japanese-translator/.env.local` (gitignored), copied from the workspace-root `.env.local` (see `[reference_env_local]` memory).
+- Surface a one-line privacy notice when audio upload is used.
 
 ---
 
-# 9. AI Explanation Layer
+## 13. Future features (post-v0)
 
-Explain:
-- grammar
-- nuance
-- politeness
-- slang
-- gendered speech
+Single consolidated list — implementation order is the user's call, not a sequence dependency.
 
----
-
-# 10. Offline Mode
-
-Future stack:
-- whisper.cpp
-- local TTS
-- local translation models
-
----
-
-# Suggested Build Order
-
-1. UI scaffold
-2. Input detection
-3. Kuroshiro integration
-4. Translation API
-5. Browser TTS
-6. Whisper transcription
-7. Mobile optimization
-8. Polishing
+| # | Feature | Notes |
+|---|---|---|
+| 1 | Romaji auto-correction | `konichiwa` → `konnichiwa` → こんにちは |
+| 2 | Casual ↔ Standard mode | `omae nani shiteru` → お前、何してる？ AND あなたは何をしていますか？ with politeness tags |
+| 3 | Furigana overlays | 日本語 / にほんご / nihongo stacked |
+| 4 | Accent-aware audio | Tokyo-standard pitch accent |
+| 5 | Pitch-accent visualization | Inline pitch curves over kana |
+| 6 | Shadowing practice | Loop, slow playback, A/B compare |
+| 7 | Pronunciation scoring | Whisper-based phoneme matching |
+| 8 | JLPT tagging | N5–N1 per vocabulary item |
+| 9 | AI explanation layer | Grammar, nuance, politeness, gendered speech |
+| 10 | Offline mode | whisper.cpp + local TTS + local translation |
+| 11 | Kunrei romaji option | Toggle in settings; default stays Hepburn |
 
 ---
 
-# Suggested Libraries
+## 14. Open questions
 
-## Core
-- kuroshiro
-- kuromoji
-
-## Translation
-- deepl-node
-OR
-- libretranslate
-
-## Speech
-- openai whisper
-OR
-- whisper.cpp
-
-## UI
-- shadcn/ui
-- Tailwind CSS
+1. **Romaji standard** — confirmed Hepburn for v0. Kunrei behind a setting (see #11).
+2. **Kanji disambiguation** — v0 shows top candidate only, with `candidates` array on the response for the UI to surface alternatives when confidence is low. Full disambiguation UI is post-v0.
+3. **Audio storage** — v0 generates audio client-side via `speechSynthesis`; nothing is uploaded or stored. Re-evaluate when backend TTS lands.
+4. **Provider routing strategy** — single provider (Claude) for translation in v0. Multi-provider routing per `.AI-Agents/orchestrator.md` is post-v0; treat the markdown there as design notes, not contract.
 
 ---
 
-# Final Recommendation
+## 15. Next concrete steps
 
-Build MVP FAST.
+In order — each step is one branch (`<type>/<topic>` per the repo convention):
 
-Avoid over-engineering:
-- local AI
-- offline models
-- complex NLP pipelines
+1. **`feat/translate-api`** — Add `app/api/translate/route.ts` with Claude wired up; wrap in `unstable_cache`. See [`.claude/skills/wire-provider/SKILL.md`](../.claude/skills/wire-provider/SKILL.md).
+2. **`feat/kana-card`** — Add the missing 5th output card to `components/translator.tsx`. Hardcode kana for now; comes from the API in step 4.
+3. **`feat/transliteration`** — Install Kuroshiro + Kuromoji, write `lib/transliteration.ts` with `toKana`, `toRomaji`, `detectInputType`. Add unit tests.
+4. **`feat/translator-client`** — Replace the hardcoded `translations` object in `translator.tsx` with a debounced fetch to `/api/translate`. Add loading skeletons.
+5. **`feat/browser-tts`** — Wire the Audio card's Play button to `speechSynthesis.speak()` with the Japanese output.
+6. **`feat/whisper-input`** — Activate the mic button. Capture audio, send to `/api/translate` with `audioBase64`.
 
-Start with:
-- browser TTS
-- hosted translation APIs
-- Kuroshiro
-
-Validate UX first.
+Estimate: each step is 2-6 hours of focused work, ~3 days end-to-end for v0.
 
 ---
 
-# DETAILED PRODUCT PROMPT
+## 16. Positioning
 
-## Master Prompt
+Do **not** market this as a translator. The product names in current docs ("Japanese Translator") undersell it. Better framing:
 
-Build a modern Japanese language mapping web application that functions as a unified 4-way translator and pronunciation bridge.
+- **Japanese speech mapper**
+- **Japanese pronunciation bridge**
+- **Romaji-to-real-Japanese assistant**
+- **Japanese speech companion**
 
-The app must support the following input types:
-1. English
-2. Romaji
-3. Standard Japanese (Hyōjungo)
-4. Audio speech input
+Move the README's `title` and `description` metadata to match. Currently `app/layout.tsx` still has `"Create Next App"` as the title — fix as part of step 1.
 
-The app should automatically detect the input type and generate all remaining forms.
+---
 
-For every input, the system should output:
-- English translation
-- Standard Japanese output
-- Kana representation
-- Romaji transliteration
-- Native-like audio pronunciation playback
+## 17. Closest existing apps
 
-The app should focus heavily on:
-- natural Japanese
-- pronunciation
-- transliteration
-- speech normalization
-- beginner friendliness
-- conversational usability
+| App | What overlaps | What we'd do differently |
+|---|---|---|
+| Perapera | Furigana + reading helper | Add full bidirectional translation + audio |
+| TabiTalk | Phrasebook-style audio | Generative coverage, not curated phrases |
+| VoiceTra | Speech in/out | Show kana + romaji simultaneously (VoiceTra hides them) |
+| Takoboto | Dictionary | We are sentence-level, not word-level |
 
-The app should not feel like a traditional translator. It should feel like a Japanese pronunciation and speech companion.
-
-Use:
-- Next.js
-- TypeScript
-- Tailwind CSS
-- shadcn/ui
-
-Use:
-- Kuroshiro + Kuromoji for transliteration
-- DeepL or LibreTranslate for translation
-- Whisper for speech-to-text
-- browser TTS initially for speech synthesis
-
-The UI should:
-- be mobile responsive
-- have a modern minimal design
-- support audio playback
-- support copy buttons
-- support live updates
-- support dark mode
-- clearly separate outputs
-
-The app architecture should include:
-- input detection layer
-- translation layer
-- transliteration layer
-- speech recognition layer
-- text-to-speech layer
-
-Future advanced features should include:
-- Romaji auto correction
-- anime/casual Japanese normalization
-- furigana overlays
-- pitch accent visualization
-- pronunciation scoring
-- shadowing practice
-- AI grammar explanations
-- JLPT tagging
-- offline mode
-- local speech models
-
-The app should emphasize:
-- fast response
-- clean UX
-- natural pronunciation
-- Tokyo-standard Japanese speech
-- educational usefulness
-
-The product positioning should be:
-- Japanese speech mapper
-- Japanese pronunciation bridge
-- Romaji-to-real-Japanese assistant
-- Japanese speech companion
-
-The app should aim to become the easiest way for users to move fluidly between:
-- hearing Japanese
-- reading Japanese
-- typing romaji
-- understanding English
-- speaking naturally
+The clean unified workflow over {English, Romaji, Japanese, Audio} remains an open niche.
