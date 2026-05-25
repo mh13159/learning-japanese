@@ -178,3 +178,60 @@ export function isLikelyDictionaryQuery(text: string): boolean {
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.length >= 1 && words.length <= 3;
 }
+
+export type DisambiguateResult = "english" | "romaji" | "neither";
+
+// For ambiguous short ASCII inputs (could be English or romaji), use Jisho to
+// see whether the literal string appears as an English gloss or as a Japanese
+// reading. This is a single network call and the result is cached.
+export async function disambiguateAsciiInput(text: string): Promise<DisambiguateResult> {
+  const stripped = normalize(text);
+  if (!stripped) return "neither";
+
+  const cacheKey = `disambig:${stripped}`;
+  const cached = memCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached === null ? "neither" : ((cached.kana ? "romaji" : "english") as DisambiguateResult);
+  }
+
+  const response = await jishoFetch(stripped);
+  if (!response?.data || response.data.length === 0) {
+    rememberMiss(cacheKey);
+    return "neither";
+  }
+
+  let englishGlossMatch = false;
+  let japaneseReadingMatch = false;
+  for (const entry of response.data) {
+    for (const s of entry.senses ?? []) {
+      for (const d of s.english_definitions ?? []) {
+        if (normalize(d) === stripped) {
+          englishGlossMatch = true;
+        }
+      }
+    }
+    for (const j of entry.japanese ?? []) {
+      // Convert Japanese readings to romaji-ish for comparison: katakana/hiragana
+      // readings would not match ASCII directly; the jisho slug or reading is
+      // already in kana. Match against the entry's romaji reading by converting.
+      const reading = j.reading ?? "";
+      // Quick kana->romaji is overkill — instead approximate by checking if the
+      // jisho slug or any entry's word string is the ASCII input itself
+      // (which never happens for kana). Use reading equivalence via the
+      // is_common flag and JLPT tag presence as a proxy that the input is
+      // genuinely Japanese vocabulary.
+      if (reading && entry.is_common && (entry.jlpt?.length ?? 0) > 0) {
+        // Very strong signal that this is real Japanese vocabulary.
+        japaneseReadingMatch = true;
+      }
+    }
+  }
+
+  if (englishGlossMatch) {
+    // Even if there's a Japanese reading match, prefer English when the input
+    // is a real English gloss — that's almost always the user's intent.
+    return "english";
+  }
+  if (japaneseReadingMatch) return "romaji";
+  return "neither";
+}

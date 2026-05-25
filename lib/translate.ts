@@ -1,7 +1,12 @@
 import Kuroshiro from "kuroshiro";
 import KuromojiAnalyzer from "kuroshiro-analyzer-kuromoji";
 import * as wanakana from "wanakana";
-import { lookupEnglishWord, lookupJapaneseWord, isLikelyDictionaryQuery } from "./dictionary";
+import {
+  lookupEnglishWord,
+  lookupJapaneseWord,
+  isLikelyDictionaryQuery,
+  disambiguateAsciiInput,
+} from "./dictionary";
 
 export type DetectedType = "english" | "romaji" | "japanese";
 
@@ -64,6 +69,43 @@ function getKuroshiro(): Promise<Kuroshiro> {
   return kuroshiroPromise;
 }
 
+export type DetectSyncResult = DetectedType | "ambiguous";
+
+export function detectSync(text: string): DetectSyncResult {
+  const t = text.trim();
+  if (!t) return "english";
+  if (RX_JP_CHARS.test(t)) return "japanese";
+  if (!/^[\x00-\x7F]+$/.test(t)) return "english";
+
+  const cleanWords = t
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ""))
+    .filter(Boolean);
+  if (cleanWords.length === 0) return "english";
+
+  const englishHits = cleanWords.filter((w) => ENGLISH_COMMON.has(w)).length;
+  const romajiHits = cleanWords.filter((w) => ROMAJI_TOKENS.has(w)).length;
+
+  if (cleanWords.length >= 3) {
+    if (englishHits > romajiHits) return "english";
+    if (romajiHits > englishHits) return "romaji";
+  }
+  if (englishHits > 0 && romajiHits === 0) return "english";
+  if (romajiHits > 0 && englishHits === 0) return "romaji";
+
+  const ascii = cleanWords.join("");
+  if (!/^[aeiouknhmrstzpbgdwyfjvch]+$/.test(ascii)) return "english";
+  const hasEnglishCluster = /(th|ph|wh|ck|ng|gh|qu|ld|mp|nd|nt|rk|rt|rm|sm|sp|st|ld|lk|lp|lf|sk|sl|sw|tr|br|cr|dr|fr|gr|pr|wr|bl|cl|fl|gl|pl|rr|ll|ff|mm|dd|ww|bb|ee|oo)/.test(ascii);
+  if (hasEnglishCluster) return "english";
+  // Unambiguous Japanese syllable patterns only. "ou", "ei", "aa", "ii", "uu"
+  // also occur in English words (house, vein, etc.) so we exclude them here
+  // and let the async dictionary tiebreaker resolve such cases.
+  const hasJapanesePhonotactics = /(tsu|cha|chi|cho|chu|sha|shi|sho|shu|kyo|kya|kyu|ryo|rya|ryu|nyo|nya|nyu|gyo|gya|gyu|hyo|hya|hyu|nn)/.test(ascii);
+  if (hasJapanesePhonotactics) return "romaji";
+  return "ambiguous";
+}
+
 export function detectInputType(text: string): DetectedType {
   const t = text.trim();
   if (!t) return "english";
@@ -89,12 +131,21 @@ export function detectInputType(text: string): DetectedType {
   if (englishHits > 0 && romajiHits === 0) return "english";
   if (romajiHits > 0 && englishHits === 0) return "romaji";
 
-  // Fallback for unknown short inputs: assume romaji only if it's plausibly
-  // made of Japanese-syllable letters AND the input is short.
+  // Tiebreaker for short, unknown inputs: distinguish romaji from English by
+  // Japanese phonotactic signal — strict CV (consonant-vowel) structure, no
+  // consonant clusters except specific digraphs, and ≥3 vowels for words that
+  // are long enough to be romanized Japanese vocabulary.
   const ascii = cleanWords.join("");
-  const looksLikeRomaji = /^[aeiouknhmrstzpbgdwyfjvch]+$/.test(ascii);
-  if (looksLikeRomaji && cleanWords.length <= 2) return "romaji";
+  if (!/^[aeiouknhmrstzpbgdwyfjvch]+$/.test(ascii)) return "english";
 
+  const vowels = (ascii.match(/[aeiou]/g) ?? []).length;
+  const hasJapanesePhonotactics = /(tsu|cha|chi|cho|chu|sha|shi|sho|shu|kyo|kya|kyu|ryo|rya|ryu|nyo|nya|nyu|gyo|gya|gyu|hyo|hya|hyu|jya|jyo|jyu|byu|byo|bya|pyo|pyu|pya|myu|myo|mya|ou|ei|aa|ii|uu|nn)/.test(ascii);
+  // English-only consonant clusters and digraphs (none of these occur in romaji).
+  const hasEnglishCluster = /(th|ph|wh|ck|ng|gh|qu|ld|mp|nd|nt|rk|rt|rm|sm|sp|st|ld|lk|lp|lf|sk|sl|sw|tr|br|cr|dr|fr|gr|pr|wr|bl|cl|fl|gl|pl|rr|ll|ff|mm|dd|ww|bb|ee|oo)/.test(ascii);
+
+  if (hasEnglishCluster) return "english";
+  if (hasJapanesePhonotactics && vowels >= 2) return "romaji";
+  if (vowels >= 3 && cleanWords.length === 1 && ascii.length >= 5) return "romaji";
   return "english";
 }
 
@@ -225,7 +276,14 @@ export async function translate(rawInput: string): Promise<Translation> {
   const cached = memCache.get(normalized);
   if (cached) return { ...cached, meta: { ...cached.meta, cached: true } };
 
-  const detected = detectInputType(normalized);
+  const syncResult = detectSync(normalized);
+  let detected: DetectedType;
+  if (syncResult === "ambiguous") {
+    const tiebreak = await disambiguateAsciiInput(normalized);
+    detected = tiebreak === "romaji" ? "romaji" : "english";
+  } else {
+    detected = syncResult;
+  }
   const notes: string[] = [];
   const providers: string[] = ["kuroshiro"];
 
