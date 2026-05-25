@@ -1,6 +1,7 @@
 import Kuroshiro from "kuroshiro";
 import KuromojiAnalyzer from "kuroshiro-analyzer-kuromoji";
 import * as wanakana from "wanakana";
+import { seedLookupEnToJa, seedLookupJaToEn, SEED_SIZE } from "./seed-translations";
 
 export type DetectedType = "english" | "romaji" | "japanese";
 
@@ -146,12 +147,16 @@ export async function translate(rawInput: string): Promise<Translation> {
   if (detected === "japanese") {
     const j = await processJapanese(normalized);
     ({ japanese, kana, romaji } = j);
-    const en = await libreTranslate(japanese, { source: "ja", target: "en" });
+    const en =
+      (await libreTranslate(japanese, { source: "ja", target: "en" })) ??
+      seedLookupJaToEn(japanese);
     if (en) {
       english = en;
-      providers.push("libretranslate");
+      providers.push(process.env.LIBRETRANSLATE_URL ? "libretranslate" : `seed-dict(${SEED_SIZE})`);
     } else {
-      notes.push("English unavailable — set LIBRETRANSLATE_URL to enable JA→EN.");
+      notes.push(
+        `English unavailable — phrase not in the ${SEED_SIZE}-entry offline dictionary. Self-host LibreTranslate and set LIBRETRANSLATE_URL for full coverage.`,
+      );
     }
   } else if (detected === "romaji") {
     const j = await processRomaji(normalized);
@@ -159,20 +164,26 @@ export async function translate(rawInput: string): Promise<Translation> {
     providers.push("wanakana");
     confidence = 0.7;
     notes.push("Romaji input lacks kanji disambiguation — output uses kana only.");
-    const en = await libreTranslate(japanese, { source: "ja", target: "en" });
+    const en =
+      (await libreTranslate(japanese, { source: "ja", target: "en" })) ??
+      seedLookupJaToEn(japanese);
     if (en) {
       english = en;
-      providers.push("libretranslate");
+      providers.push(process.env.LIBRETRANSLATE_URL ? "libretranslate" : `seed-dict(${SEED_SIZE})`);
     }
   } else {
     english = normalized;
-    const ja = await libreTranslate(normalized, { source: "en", target: "ja" });
+    const ja =
+      (await libreTranslate(normalized, { source: "en", target: "ja" })) ??
+      seedLookupEnToJa(normalized);
     if (ja) {
-      providers.push("libretranslate");
+      providers.push(process.env.LIBRETRANSLATE_URL ? "libretranslate" : `seed-dict(${SEED_SIZE})`);
       const j = await processJapanese(ja);
       ({ japanese, kana, romaji } = j);
     } else {
-      notes.push("Japanese unavailable — set LIBRETRANSLATE_URL to enable EN→JA.");
+      notes.push(
+        `Japanese unavailable — phrase not in the ${SEED_SIZE}-entry offline dictionary. Self-host LibreTranslate and set LIBRETRANSLATE_URL for full coverage.`,
+      );
       confidence = 0.3;
     }
   }
