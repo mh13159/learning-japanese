@@ -1,0 +1,18 @@
+{
+  "agent": "claude",
+  "version": "1.0.0",
+  "skills": [
+    "base_dev_lifecycle_skills",
+    "agentic_workflow_orchestrator"
+  ],
+  "capabilities": [
+    "code_analysis",
+    "testing",
+    "deployment",
+    "orchestration"
+  ],
+  "settings": {
+    "autoOptimize": true,
+    "logLevel": "info"
+  }
+}
