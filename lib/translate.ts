@@ -1,7 +1,7 @@
 import Kuroshiro from "kuroshiro";
 import KuromojiAnalyzer from "kuroshiro-analyzer-kuromoji";
 import * as wanakana from "wanakana";
-import { seedLookupEnToJa, seedLookupJaToEn, SEED_SIZE } from "./seed-translations";
+import { lookupEnglishWord, lookupJapaneseWord, isLikelyDictionaryQuery } from "./dictionary";
 
 export type DetectedType = "english" | "romaji" | "japanese";
 
@@ -19,10 +19,37 @@ export type Translation = {
   };
 };
 
-const RX_JP_CHARS = /[぀-ゟ゠-ヿ一-鿿豈-﫿]/;
-const RX_ROMAJI_PARTICLES = /(^|\s)(wa|ga|wo|ni|de|no|to|mo|ka|ne|yo)(\s|$|\?|!|\.|,)/i;
-const RX_ROMAJI_ENDINGS = /(desu|masu|deshita|nai|kudasai|imasu|aru|iru|suru|kuru)/i;
-const RX_ROMAJI_SYLLABLES = /(ts|ky|sh|ch|ry|ny|my|gy|by|py|hy)[aiueo]|[kstnhmrgzdbpw][aiueo]{1,2}/i;
+const RX_JP_CHARS = /[぀-ゟ゠-ヿ一-鿿豈-﫿]/;
+
+// English common vocabulary (~120 entries) — used ONLY for the input-type detector,
+// not for translation. Detection is heuristic; translation is delegated to
+// open-source services (Jisho.org JMdict + LibreTranslate).
+const ENGLISH_COMMON = new Set([
+  "the","a","an","is","are","was","were","i","you","he","she","it","we","they",
+  "and","or","but","not","of","in","on","at","to","for","with","this","that",
+  "have","has","had","do","does","did","be","been","being","go","going","went",
+  "what","how","where","when","why","who","which","my","your","his","her",
+  "their","our","its","me","him","us","them","would","could","should","will",
+  "shall","may","might","must","can","like","want","need","know","think","make",
+  "made","get","got","take","took","give","gave","see","saw","come","came",
+  "hello","hi","yes","no","please","thanks","thank","sorry","ok","okay",
+  "from","by","about","into","over","under","through","between","after","before",
+  "very","really","just","also","still","again","always","never","now","then",
+  "next","summer","winter","spring","autumn","fall","day","night","year","month",
+  "week","mountain","mount","city","country","beautiful","nice","good","bad",
+  "happy","sad","love","tired","sleepy","hungry","cold","hot","big","small",
+]);
+
+// Romaji-only tokens that are unambiguous Japanese vocabulary or particles.
+// Used ONLY for detection.
+const ROMAJI_TOKENS = new Set([
+  "wa","ga","wo","ni","de","no","to","mo","ka","ne","yo",
+  "desu","masu","deshita","datta","desune","desuyo","kudasai",
+  "konnichiwa","ohayou","sayounara","sumimasen","sayonara","onegai","onegaishimasu",
+  "imasu","arimasu","watashi","anata","kare","kanojo","kore","sore","are",
+  "nan","nani","dare","doko","itsu","naze","dou","ikura","ikutsu",
+  "arigatou","arigato","gozaimasu","hai","iie",
+]);
 
 let kuroshiroPromise: Promise<Kuroshiro> | null = null;
 
@@ -42,26 +69,59 @@ export function detectInputType(text: string): DetectedType {
   if (!t) return "english";
   if (RX_JP_CHARS.test(t)) return "japanese";
 
-  const asciiOnly = /^[\x00-\x7F]+$/.test(t);
-  if (!asciiOnly) return "english";
+  if (!/^[\x00-\x7F]+$/.test(t)) return "english";
 
-  const romajiScore =
-    (RX_ROMAJI_PARTICLES.test(t) ? 2 : 0) +
-    (RX_ROMAJI_ENDINGS.test(t) ? 2 : 0) +
-    (RX_ROMAJI_SYLLABLES.test(t) ? 1 : 0);
+  const cleanWords = t
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ""))
+    .filter(Boolean);
+  if (cleanWords.length === 0) return "english";
 
-  const words = t.toLowerCase().split(/\s+/);
-  const englishCommon = new Set([
-    "the","a","an","is","are","was","were","i","you","he","she","it","we","they",
-    "and","or","but","not","of","in","on","at","to","for","with","this","that",
-    "have","has","do","does","did","be","been","being","go","going","what","how",
-    "where","when","why","who","hello","hi","yes","no","please","thanks","thank",
-  ]);
-  const englishHits = words.filter((w) => englishCommon.has(w.replace(/[^a-z]/g, ""))).length;
+  const englishHits = cleanWords.filter((w) => ENGLISH_COMMON.has(w)).length;
+  const romajiHits = cleanWords.filter((w) => ROMAJI_TOKENS.has(w)).length;
 
-  if (englishHits >= 1 && romajiScore < 2) return "english";
-  if (romajiScore >= 1) return "romaji";
+  if (cleanWords.length >= 3) {
+    if (englishHits > romajiHits) return "english";
+    if (romajiHits > englishHits) return "romaji";
+  }
+
+  if (englishHits > 0 && romajiHits === 0) return "english";
+  if (romajiHits > 0 && englishHits === 0) return "romaji";
+
+  // Fallback for unknown short inputs: assume romaji only if it's plausibly
+  // made of Japanese-syllable letters AND the input is short.
+  const ascii = cleanWords.join("");
+  const looksLikeRomaji = /^[aeiouknhmrstzpbgdwyfjvch]+$/.test(ascii);
+  if (looksLikeRomaji && cleanWords.length <= 2) return "romaji";
+
   return "english";
+}
+
+// Algorithmic orthography fix for romaji input: when wanakana produces kana
+// using the strict-phonetic rule (e.g. "konnichiwa" → こんにちわ), restore
+// the particle exceptions that real Japanese uses (は for the topic-marker
+// wa, へ for the direction-marker e, を for the object-marker o).
+// This is rule-based, not a lookup table.
+function fixRomajiParticleKana(kana: string, originalRomaji: string): string {
+  const lower = originalRomaji.toLowerCase().trim();
+  let out = kana;
+  // Trailing "wa" preceded by a space-or-particle position → は
+  // Common cases: "konnichiwa" (greeting), "kore wa", "watashi wa", "X wa".
+  // wanakana renders trailing "wa" as わ; the canonical form for the particle
+  // and the greeting suffix is は.
+  if (/(^|\s)(konnichiwa|konbanwa|kombanwa)$/.test(lower)) {
+    out = out.replace(/わ$/, "は");
+  }
+  // Standalone trailing " wa" particle.
+  out = out.replace(/(\S)\s?わ($|\s|、|。)/g, (_m, before, after) => `${before}は${after}`);
+  // Trailing " wo" or " o" object-marker particle → を (wanakana already does
+  // を for "wo" but renders bare "o" as お — handle the "o" particle case).
+  out = out.replace(/(\S)\sお($|\s|、|。)/g, (_m, before, after) => `${before}を${after}`);
+  // " he" direction marker → へ (wanakana gives へ correctly for "he", noop
+  // here but kept for symmetry).
+  out = out.replace(/(\S)\sえ($|\s|、|。)/g, (_m, before, after) => `${before}へ${after}`);
+  return out;
 }
 
 async function processJapanese(text: string) {
@@ -73,9 +133,15 @@ async function processJapanese(text: string) {
   return { japanese: text, kana, romaji };
 }
 
-async function processRomaji(text: string) {
-  const kana = wanakana.toKana(text);
-  return processJapanese(kana);
+async function processRomaji(originalRomaji: string) {
+  let kana = wanakana.toKana(originalRomaji);
+  kana = fixRomajiParticleKana(kana, originalRomaji);
+  // Strip any leftover ASCII characters that wanakana couldn't map
+  // (e.g. trailing punctuation that survived).
+  const kanaOnly = kana.replace(/[A-Za-z]/g, "");
+  const k = await getKuroshiro();
+  const standardRomaji = await k.convert(kanaOnly, { to: "romaji", romajiSystem: "hepburn" });
+  return { japanese: kanaOnly, kana: kanaOnly, romaji: standardRomaji || originalRomaji };
 }
 
 type LibreTranslateOptions = {
@@ -83,7 +149,10 @@ type LibreTranslateOptions = {
   target: "en" | "ja";
 };
 
-async function libreTranslate(text: string, opts: LibreTranslateOptions): Promise<string | null> {
+async function libreTranslate(
+  text: string,
+  opts: LibreTranslateOptions,
+): Promise<string | null> {
   const baseUrl = process.env.LIBRETRANSLATE_URL?.replace(/\/$/, "");
   if (!baseUrl) return null;
 
@@ -101,7 +170,7 @@ async function libreTranslate(text: string, opts: LibreTranslateOptions): Promis
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { translatedText?: string };
@@ -109,6 +178,33 @@ async function libreTranslate(text: string, opts: LibreTranslateOptions): Promis
   } catch {
     return null;
   }
+}
+
+// Two-tier EN→JA: dictionary first (jisho/JMdict) for short queries that look
+// like vocabulary lookups; LibreTranslate for sentences or when the dictionary
+// has no confident match.
+async function resolveEnToJa(text: string): Promise<{ ja: string; source: string } | null> {
+  if (isLikelyDictionaryQuery(text)) {
+    const dict = await lookupEnglishWord(text);
+    if (dict?.japanese) {
+      return { ja: dict.japanese, source: dict.isCommon ? "jisho(common)" : "jisho" };
+    }
+  }
+  const lt = await libreTranslate(text, { source: "en", target: "ja" });
+  if (lt) return { ja: lt, source: "libretranslate" };
+  return null;
+}
+
+async function resolveJaToEn(text: string): Promise<{ en: string; source: string } | null> {
+  if (isLikelyDictionaryQuery(text)) {
+    const dict = await lookupJapaneseWord(text);
+    if (dict?.englishGloss) {
+      return { en: dict.englishGloss, source: dict.isCommon ? "jisho(common)" : "jisho" };
+    }
+  }
+  const lt = await libreTranslate(text, { source: "ja", target: "en" });
+  if (lt) return { en: lt, source: "libretranslate" };
+  return null;
 }
 
 const memCache = new Map<string, Translation>();
@@ -122,12 +218,7 @@ export async function translate(rawInput: string): Promise<Translation> {
       japanese: "",
       kana: "",
       romaji: "",
-      meta: {
-        detected: "english",
-        confidence: 0,
-        provider: "none",
-        cached: false,
-      },
+      meta: { detected: "english", confidence: 0, provider: "none", cached: false },
     };
   }
 
@@ -147,42 +238,38 @@ export async function translate(rawInput: string): Promise<Translation> {
   if (detected === "japanese") {
     const j = await processJapanese(normalized);
     ({ japanese, kana, romaji } = j);
-    const en =
-      (await libreTranslate(japanese, { source: "ja", target: "en" })) ??
-      seedLookupJaToEn(japanese);
-    if (en) {
-      english = en;
-      providers.push(process.env.LIBRETRANSLATE_URL ? "libretranslate" : `seed-dict(${SEED_SIZE})`);
+    const enRes = await resolveJaToEn(japanese);
+    if (enRes) {
+      english = enRes.en;
+      providers.push(enRes.source);
     } else {
       notes.push(
-        `English unavailable — phrase not in the ${SEED_SIZE}-entry offline dictionary. Self-host LibreTranslate and set LIBRETRANSLATE_URL for full coverage.`,
+        "English unavailable — neither the dictionary nor LibreTranslate returned a result.",
       );
     }
   } else if (detected === "romaji") {
     const j = await processRomaji(normalized);
     ({ japanese, kana, romaji } = j);
     providers.push("wanakana");
-    confidence = 0.7;
-    notes.push("Romaji input lacks kanji disambiguation — output uses kana only.");
-    const en =
-      (await libreTranslate(japanese, { source: "ja", target: "en" })) ??
-      seedLookupJaToEn(japanese);
-    if (en) {
-      english = en;
-      providers.push(process.env.LIBRETRANSLATE_URL ? "libretranslate" : `seed-dict(${SEED_SIZE})`);
+    confidence = 0.75;
+    const enRes = await resolveJaToEn(japanese);
+    if (enRes) {
+      english = enRes.en;
+      providers.push(enRes.source);
     }
+    notes.push(
+      "Romaji input has no kanji disambiguation — output uses kana only. Type Japanese directly for kanji-aware output.",
+    );
   } else {
     english = normalized;
-    const ja =
-      (await libreTranslate(normalized, { source: "en", target: "ja" })) ??
-      seedLookupEnToJa(normalized);
-    if (ja) {
-      providers.push(process.env.LIBRETRANSLATE_URL ? "libretranslate" : `seed-dict(${SEED_SIZE})`);
-      const j = await processJapanese(ja);
+    const jaRes = await resolveEnToJa(normalized);
+    if (jaRes) {
+      providers.push(jaRes.source);
+      const j = await processJapanese(jaRes.ja);
       ({ japanese, kana, romaji } = j);
     } else {
       notes.push(
-        `Japanese unavailable — phrase not in the ${SEED_SIZE}-entry offline dictionary. Self-host LibreTranslate and set LIBRETRANSLATE_URL for full coverage.`,
+        "Japanese unavailable — neither the dictionary nor LibreTranslate returned a result.",
       );
       confidence = 0.3;
     }

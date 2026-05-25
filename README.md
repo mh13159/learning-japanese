@@ -1,202 +1,130 @@
-# Japanese Translator
+# Japanese Speech Companion
 
-A modern AI-powered Japanese to English translation application built with Next.js and multi-provider AI orchestration.
+A FOSS Japanese ↔ English ↔ Romaji ↔ Kana mapper. Type or speak any of the four forms and see the rest. No commercial AI, no API keys at runtime.
 
 ## 🎯 Overview
 
-This project demonstrates an **agentic AI framework** that intelligently routes translation and language processing tasks across multiple AI providers:
+The pipeline is 100% free and open-source:
 
-- **Claude (Anthropic)** - Advanced reasoning and complex translations
-- **NVIDIA Build** - Fast, free-tier inference
-- **OpenAI (GPT)** - General-purpose translation and NLP
-- **Google Gemini** - Multimodal translation with image support
+| Layer | Stack | License |
+|---|---|---|
+| Framework | Next.js 16 + React 19 + TypeScript 5 | MIT |
+| UI | Tailwind v4 + shadcn/ui (Radix) | MIT |
+| Tokenization & readings | [Kuromoji.js](https://github.com/takuyaa/kuromoji.js) | Apache 2.0 |
+| Kana ↔ Romaji ↔ Kanji-reading | [Kuroshiro](https://github.com/hexenq/kuroshiro) | MIT |
+| Romaji typing → kana | [wanakana](https://github.com/WaniKani/WanaKana) | MIT |
+| EN ⇄ JA (optional) | Self-hosted [LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) | AGPLv3 |
+| EN ⇄ JA fallback | Bundled 152-entry phrase dictionary | this repo |
+| Speech-in | Web Speech API (`SpeechRecognition`, browser) | browser-builtin |
+| Speech-out | Web Speech API (`speechSynthesis`, browser) | browser-builtin |
 
-The global orchestrator automatically selects the optimal provider based on task requirements, cost, and performance.
+Nothing leaves the device unless you configure `LIBRETRANSLATE_URL`, and even then you're free to point it at your own self-hosted instance.
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js 18+
-- npm or yarn
-- API keys from at least one AI provider
+- Node.js 20+ (Node 24 tested) and npm
+- No API keys required
 
-### 1. Setup Environment
+### 1. Install
+```bash
+git clone https://github.com/mh13159/learning-japanese.git
+cd learning-japanese
+npm install
+```
+
+### 2. (Optional) Enable open-vocabulary EN ⇄ JA
+
+Without this step, EN ⇄ JA falls back to a 152-entry phrase dictionary that covers greetings, common questions, JLPT N5 vocab, and travel basics. Japanese ⇄ kana ⇄ romaji is fully functional offline regardless.
+
+For unbounded EN ⇄ JA, self-host LibreTranslate:
 
 ```bash
-# Clone and navigate
-cd e:\Learning Japanese - v2\japanese-translator
+# Docker (recommended)
+docker run -d --name libretranslate -p 5000:5000 \
+  libretranslate/libretranslate --load-only en,ja
 
-# Install dependencies
-npm install
+# OR Python
+pip install libretranslate
+libretranslate --host 127.0.0.1 --port 5000 --load-only en,ja
+```
 
-# Create environment file
+Then:
+```bash
 cp .env.local.example .env.local
+# .env.local already has LIBRETRANSLATE_URL=http://localhost:5000
 ```
 
-### 2. Add API Keys
-
-Edit `.env.local`:
-```
-CLAUDE_API_KEY=your_claude_key
-NVIDIA_API_KEY=your_nvidia_key
-OPENAI_API_KEY=your_openai_key
-GOOGLE_GEMINI_API_KEY=your_gemini_key
-```
-
-### 3. Run Development Server
-
+### 3. Run
 ```bash
 npm run dev
 ```
-
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3000](http://localhost:3000).
 
 ## 📁 Project Structure
 
-- **`.AI-Agents/`** - AI agent skills and orchestration
-  - **`.claude/`** - Anthropic Claude AI agent
-  - **`.nvidia/`** - NVIDIA Build AI models
-  - **`.openai/`** - OpenAI models
-  - **`.gemini/`** - Google Gemini AI
-  - See [.AI-Agents documentation](./.AI-Agents/README.md) for consolidated provider overview
+- [`app/`](./app/) — Next.js App Router. `app/api/translate/route.ts` is the only API route.
+- [`components/translator.tsx`](./components/translator.tsx) — Client component, the entire UI.
+- [`lib/translate.ts`](./lib/translate.ts) — Detection, Kuroshiro/wanakana wrappers, LibreTranslate client, in-memory cache.
+- [`lib/seed-translations.ts`](./lib/seed-translations.ts) — Offline phrase dictionary fallback.
+- [`docs/`](./docs/) — Design spec ([`japanese_4way_translator_handoff.md`](./docs/japanese_4way_translator_handoff.md)) and timestamped session handoffs.
+- [`.claude/`](./.claude/) — Claude Code conventions and project-specific skills (token-saving, branching, docs workflow).
 
-- **`app/`** - Next.js application
-- **`components/`** - React components
-- **`lib/`** - Utility functions
-- **`public/`** - Static assets
+The [`.AI-Agents/`](./.AI-Agents/) directory contains earlier design notes about a multi-provider AI orchestrator. **That orchestrator is not part of this app** — the runtime is FOSS-only and uses no commercial LLM. The notes are kept as historical context.
 
 ## 💡 How It Works
 
-1. **User Input** - Submit Japanese text for translation
-2. **Global Orchestrator** - Analyzes task requirements
-3. **Provider Selection** - Routes to optimal AI provider
-4. **Processing** - AI provider generates translation
-5. **Result Aggregation** - Consolidates and validates output
-6. **Display** - Shows translation with metadata
+1. **Input** — User types or speaks text/audio.
+2. **Auto-detect** — Regex + heuristics classify the input as English, Romaji, or Japanese.
+3. **Normalize** — `String.normalize("NFKC")` and trim.
+4. **Convert** — Kuroshiro produces kana + romaji from any Japanese input; wanakana handles romaji → kana.
+5. **EN ⇄ JA** — Optional LibreTranslate call, otherwise the seed dictionary.
+6. **Cache** — In-memory LRU keyed on normalized input (max 500 entries, resets on server restart).
+7. **Display** — Five outputs in four cards (English, Japanese, Kana, Romaji) plus a TTS playback row.
 
-## 🔧 Getting Started
+## 🔌 API
 
-First, run the development server:
+The app exposes one server route. You can use it independently of the UI.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+POST /api/translate
+Content-Type: application/json
+{ "input": "<English | romaji | Japanese text>" }
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## 📚 Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## 📋 Changelog
-
-### Post-Clone Setup & Changes
-
-#### AI Agents Framework
-- ✅ Created `.AI-Agents/` directory structure
-- ✅ Added provider folders: `.claude/`, `.nvidia/`, `.openai/`, `.gemini/`
-- ✅ Implemented global orchestrator (`orchestrator.md`)
-- ✅ Added provider-specific orchestrators for each AI service
-- ✅ Created base dev lifecycle skills documentation
-- ✅ Added agentic workflow orchestrator skill
-- ✅ Organized all `.md` files into `.AI-Agents/` hierarchy
-
-#### Security Enhancements
-- ✅ Enhanced `.gitignore` with comprehensive security patterns
-- ✅ Added `.env.local` and `.credentials/` to git exclusions
-- ✅ Created `SECURITY.md` with best practices
-- ✅ Created `.env.local.example` template with warnings
-- ✅ Documented API key management strategies
-- ✅ Added environment-specific secret handling
-
-#### Documentation
-- ✅ Moved all `.md` files from root to `.AI-Agents/.claude/`
-- ✅ Created provider setup guides:
-  - `NVIDIA_BUILD_SETUP.md`
-  - `OPENAI_SETUP.md`
-  - `GEMINI_SETUP.md`
-  - `CLAUDE.md`
-- ✅ Created consolidated provider overview in `.AI-Agents/README.md`
-- ✅ Added skills registry and configuration files
-
-#### Configuration Files
-- ✅ Created `config.json` for Claude agent settings
-- ✅ Added provider-specific configuration templates
-- ✅ Documented orchestration routing logic
-
-#### Project Structure Updates
-```
-.AI-Agents/
-├── README.md (consolidated overview)
-├── orchestrator.md (global orchestrator)
-├── .claude/
-│   ├── orchestrator.md
-│   ├── CLAUDE.md
-│   ├── base_dev_lifecycle_skills.md
-│   ├── agentic_workflow_orchestrator.md
-│   ├── skills_registry.md
-│   ├── config.json
-│   └── AGENTS.md
-├── .nvidia/
-│   ├── orchestrator.md
-│   └── NVIDIA_BUILD_SETUP.md
-├── .openai/
-│   ├── orchestrator.md
-│   └── OPENAI_SETUP.md
-└── .gemini/
-    ├── orchestrator.md
-    └── GEMINI_SETUP.md
+Returns:
+```ts
+{
+  english: string;
+  japanese: string;
+  kana: string;     // hiragana, no kanji
+  romaji: string;   // Hepburn
+  meta: {
+    detected: "english" | "romaji" | "japanese";
+    confidence: number;       // 0..1
+    provider: string;         // e.g. "kuroshiro+libretranslate" or "kuroshiro+seed-dict(152)"
+    cached: boolean;
+    notes?: string[];
+  };
+}
 ```
 
-## 🔐 API Key Setup
+`GET /api/translate` returns a small health JSON.
 
-### Secure API Key Storage
+## 🧠 Browser audio support
 
-1. **Create `.env.local` file** in project root (git-ignored)
-   ```bash
-   cp .env.local.example .env.local
-   ```
+- **Speech-in (mic button)** uses `window.SpeechRecognition` with `lang="ja-JP"`. Currently supported in Chrome and Edge; Firefox/Safari users see a clear "unsupported" message.
+- **Speech-out (Play button)** uses `window.speechSynthesis.speak()` with `lang="ja-JP"`. Voice quality varies by OS — best on macOS (Kyoko) and recent Windows (Haruka / Nanami).
 
-2. **Add your API keys** to `.env.local`:
-   ```
-   CLAUDE_API_KEY=your_key
-   NVIDIA_API_KEY=your_key
-   OPENAI_API_KEY=your_key
-   GOOGLE_GEMINI_API_KEY=your_key
-   ```
+## 🔐 Environment & secrets
 
-3. **Never commit** `.env.local` - it's in `.gitignore`
+Runtime needs no secrets. The only optional variable is `LIBRETRANSLATE_URL` (see [`.env.local.example`](./.env.local.example)). The repo's `.gitignore` already excludes `.env.local` and `.credentials/`.
 
-4. **Alternative secure storage**:
-   - Use `.AI-Agents/.credentials` directory (git-ignored)
-   - Use OS keychain/credential manager
-   - Use CI/CD secrets (for deployments)
+## 📁 Historical context
 
-See [.AI-Agents documentation](./.AI-Agents/README.md) for provider-specific setup.
+The [`.AI-Agents/`](./.AI-Agents/) directory contains notes from an earlier design pass that envisioned multi-provider AI orchestration (Claude, OpenAI, Gemini, NVIDIA). **That code does not exist in this app** and the runtime never calls any commercial LLM. The notes are preserved as historical record of design exploration; they are not load-bearing for the running product.
 
-## 📖 Documentation Structure
-
-All documentation is now organized in `.AI-Agents/`:
-- **Global Orchestrator**: `.AI-Agents/orchestrator.md`
-- **Provider Docs**: `.AI-Agents/<provider>/`
-- **Skills**: `.AI-Agents/.claude/base_dev_lifecycle_skills.md`
-- **Security**: `SECURITY.md` (root)
-- **Environment**: `.env.local.example` (root)
+For the active spec, see [`docs/japanese_4way_translator_handoff.md`](./docs/japanese_4way_translator_handoff.md). For Claude Code conventions used during development, see [`CLAUDE.md`](./CLAUDE.md) and [`.claude/CLAUDE.md`](./.claude/CLAUDE.md).
 
 ## 🚀 Deploy on Vercel
 
