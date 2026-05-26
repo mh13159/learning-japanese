@@ -1,0 +1,16 @@
+# Python dependencies for the OPUS-MT / NLLB-200 translation server
+# (scripts/mt_server.py). Runtime only — no test deps.
+#
+# torch is pinned to the CPU wheel so we don't pull in the much-larger
+# CUDA stack on a machine that won't use it. If you have an NVIDIA GPU
+# and want GPU inference, remove this extra-index-url and reinstall.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch>=2.2,<3
+transformers>=4.41,<6
+ctranslate2>=4.4,<5
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1
+sentencepiece>=0.2,<1
+sacremoses>=0.1,<1
+pydantic>=2.6,<3

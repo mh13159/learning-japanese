@@ -1,180 +1,270 @@
 # Japanese Speech Companion
 
-A FOSS Japanese ↔ English ↔ Romaji ↔ Kana mapper. Type or speak any of the four forms and see the rest. No commercial AI, no API keys at runtime.
+A FOSS Japanese ↔ English ↔ Romaji ↔ Hiragana ↔ Katakana mapper. Type or speak any of the five forms and see the rest. No commercial AI, no API keys at runtime, runs entirely on your own machine after install.
 
-## 🎯 Overview
-
-The pipeline is 100% free and open-source:
-
-| Layer | Stack | License |
-|---|---|---|
-| Framework | Next.js 16 + React 19 + TypeScript 5 | MIT |
-| UI | Tailwind v4 + shadcn/ui (Radix) | MIT |
-| Tokenization & readings | [Kuromoji.js](https://github.com/takuyaa/kuromoji.js) | Apache 2.0 |
-| Kana ↔ Romaji ↔ Kanji-reading | [Kuroshiro](https://github.com/hexenq/kuroshiro) | MIT |
-| Romaji typing → kana | [wanakana](https://github.com/WaniKani/WanaKana) | MIT |
-| EN ⇄ JA (optional) | Self-hosted [LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) | AGPLv3 |
-| EN ⇄ JA fallback | Bundled 152-entry phrase dictionary | this repo |
-| Speech-in | Web Speech API (`SpeechRecognition`, browser) | browser-builtin |
-| Speech-out | Web Speech API (`speechSynthesis`, browser) | browser-builtin |
-
-Nothing leaves the device unless you configure `LIBRETRANSLATE_URL`, and even then you're free to point it at your own self-hosted instance.
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Node.js 20+ (Node 24 tested) and npm
-- No API keys required
-
-### 1. Install
-```bash
-git clone https://github.com/mh13159/learning-japanese.git
-cd learning-japanese
-npm install
+```
+┌─ English ────────┐  ┌─ Japanese ───────┐  ┌─ Hiragana ───────┐
+│ where is the     │  │ 空港はどこですか?  │  │ くうこうは        │
+│ airport          │  │                  │  │  どこですか?       │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
+┌─ Katakana ───────┐  ┌─ Romaji ─────────┐  ┌─ ▶ TTS ──────────┐
+│ クウコウハ        │  │ kūkō wa doko     │  │ Play Japanese    │
+│  ドコデスカ?      │  │  desu ka?        │  │ (browser)        │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
 ```
 
-### 2. EN ⇄ JA translation
+---
 
-**Vocabulary lookups** (1–3 word inputs) hit Jisho.org's public JMdict-backed API directly — no setup required, no key. You can type "good", "umbrella", "fish", etc. and get an accurate Japanese answer.
+## 🧩 Architecture
 
-**Sentence translation** requires a self-hosted LibreTranslate (or compatible) endpoint. Without it, sentence input falls back to a note explaining how to enable it.
+```mermaid
+flowchart TB
+    User["👤 Browser<br/>(Chrome/Edge for mic)"]
 
-```bash
-# Docker (recommended, what this repo's dev uses)
-docker run -d --name libretranslate -p 5000:5000 \
-  libretranslate/libretranslate --load-only en,ja
+    subgraph Next["Next.js 16 — :3000"]
+      UI["components/translator.tsx<br/>5 cards + mic + TTS"]
+      API["/api/translate<br/>route.ts"]
+      Lib["lib/translate.ts<br/>detection + cache + glue"]
+    end
 
-# OR Python
-pip install libretranslate
-libretranslate --host 127.0.0.1 --port 5000 --load-only en,ja
+    subgraph LocalLibs["Local libs (in-process)"]
+      Kuro["Kuroshiro + Kuromoji<br/>kanji ⇄ kana ⇄ romaji"]
+      Wana["wanakana<br/>romaji → kana"]
+    end
+
+    subgraph Sentences["Sentence translation"]
+      MT["scripts/mt_server.py — :5001<br/>FastAPI + uvicorn"]
+      NLLB["NLLB-200 distilled-600M<br/>(CTranslate2 INT8, ~600MB)"]
+    end
+
+    Dict["jisho.org/api/v1/search/words<br/>(JMdict, no key)"]
+
+    SR["Web Speech API<br/>SpeechRecognition (ja-JP)"]
+    TTS["window.speechSynthesis<br/>(ja-JP)"]
+
+    User -->|"text"| UI
+    User -->|"voice"| SR
+    SR --> UI
+    UI -->|"POST /api/translate"| API
+    API --> Lib
+    Lib --> Kuro
+    Lib --> Wana
+    Lib -.->|"HTTPS"| Dict
+    Lib -.->|"HTTP, words → dict; sentences → MT"| MT
+    MT --> NLLB
+    UI -->|"play Japanese"| TTS
+    TTS --> User
 ```
 
-Then:
-```bash
-cp .env.local.example .env.local
-# .env.local already has LIBRETRANSLATE_URL=http://localhost:5000
-```
+Two services run locally:
 
-> **Translation quality note.** LibreTranslate uses the Argos Translate package, whose EN ⇄ JA model is ~100 MB. It's reliable on vocabulary but rough on natural sentence structure — "where is the airport" becomes "空港の場所" rather than the idiomatic "空港はどこですか". The UI flags sentence-level output with a lower confidence and an advisory note.
->
-> **Recommended upgrade for higher-quality sentence translation:** NLLB-200 via the bundled FastAPI wrapper below. Argos handles vocabulary fine but mangles natural sentence structure (`where is the airport` → `空港の場所`, "the airport's place"). NLLB-200 produces idiomatic output (`空港はどこですか?`).
-
-### 3. (Recommended) NLLB-200 translation server
-
-The repo ships a small Python FastAPI service ([scripts/mt_server.py](./scripts/mt_server.py)) that wraps Meta's [NLLB-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M) and exposes a LibreTranslate-compatible `/translate` endpoint. Drop-in replacement for LibreTranslate — same JSON API, dramatically better sentence quality.
-
-```bash
-# One-time: install Python deps (Python 3.10+ required)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install transformers ctranslate2 fastapi "uvicorn[standard]" sentencepiece sacremoses
-
-# Run the server (binds 127.0.0.1:5001 by default)
-npm run opus-mt
-# or directly:
-py scripts/mt_server.py --port 5001          # default beam_size=2 (recommended)
-py scripts/mt_server.py --beam-size 1        # greedy decoding, slightly faster, marginal quality drop
-```
-
-First start downloads ~1.3 GB of NLLB-200 weights to `~/.cache/huggingface/` and **auto-converts** them to a CTranslate2 INT8 model at `~/.cache/nllb-200-ct2-int8/` (3-5 min, ~600 MB on disk). Subsequent starts load the CT2 model in ~5 seconds.
-
-**Why CTranslate2 INT8?** ~8x faster CPU inference than raw `transformers` + PyTorch on the same model, with virtually identical quality. Measured on this app:
-
-| Path | Mean latency per sentence |
-|---|---|
-| PyTorch FP32 (initial) | 7–10 s |
-| **CTranslate2 INT8 (current)** | **0.9–2 s** |
-| Cache hit (in-memory) | ~100 ms |
-
-Point the app at it by editing `.env.local`:
-```
-LIBRETRANSLATE_URL=http://localhost:5001
-```
-Restart `npm run dev`.
-
-**Quality comparison** (same input, three backends):
-
-| Input | LibreTranslate (Argos) | FuguMT | NLLB-200 |
+| Service | Port | Process | When needed |
 |---|---|---|---|
-| where is the airport | 空港の場所 | この空港のどこに | **空港はどこですか?** |
-| would you help me | お問い合わせ (!) | 私に手を差し出して | **助けてくれませんか?** |
-| I would like to visit Mount Fuji next summer | 来夏の富士山を訪れたい | この夏の山にぜひ行きたい | **来年の夏にフジ山を訪れたい** |
-| could you recommend a good restaurant | (n/a) | おすすめのよい店教えて | **良いレストランをお勧めできますか?** |
+| Next.js dev | 3000 | `npm run dev` | Always |
+| NLLB-200 MT server | 5001 | `npm run opus-mt` | Sentence translation only (word lookups hit Jisho directly) |
 
-NLLB-200 is CC-BY-NC 4.0 (non-commercial). For commercial use, swap `MODEL_NAME` in `scripts/mt_server.py` to `staka/fugumt-en-ja` + `staka/fugumt-ja-en` (Apache 2.0, somewhat lower quality) or `Helsinki-NLP/opus-mt-*` (Apache 2.0, much lower quality).
+One external HTTPS dependency: `jisho.org` for word-level EN↔JA via JMdict. No keys, community-run, optional (the app gracefully degrades to MT-server-only if Jisho is unreachable).
 
-### 3. Run
+---
+
+## ⚙️ Minimum system requirements
+
+| Component | Minimum | Recommended | Notes |
+|---|---|---|---|
+| OS | Windows 10 / macOS 12 / Ubuntu 20.04 | Windows 11 / Ubuntu 22.04+ | WSL2 works for Windows; install Node on the Windows side, MT server runs anywhere |
+| CPU | 64-bit x86 / arm64, 2 cores | 4+ cores | NLLB-200 inference is CPU-bound. More cores = faster sentences. |
+| RAM | 4 GB free | 8 GB | NLLB-200 CT2 INT8 holds ~600 MB; Node dev server ~500 MB |
+| Disk | 3 GB free | 5 GB | ~1.3 GB HF cache + 600 MB CT2 model + 500 MB node_modules + misc |
+| Node.js | 20 | 24 LTS | Tested on 24.15.0 |
+| Python | 3.10 | 3.12+ | Only needed if you run the MT server. Tested on 3.13.0 |
+| GPU | None | None | App is CPU-only by design; no CUDA needed |
+| Network | Required at install | Once warm, optional | First start downloads ~1.3 GB of model weights; runtime calls to Jisho are optional |
+| Browser | Any modern | Chrome / Edge | Mic input uses Web Speech API (Chrome/Edge only). TTS works everywhere. |
+
+---
+
+## 🚀 Quick install
+
+### One-shot (recommended)
+
+**WSL / Linux / macOS:**
 ```bash
+./install.sh
+```
+
+**Windows PowerShell:**
+```powershell
+.\install.ps1
+```
+
+Both scripts check prerequisites, install Node + Python deps, and create `.env.local`. Re-runnable; idempotent. Pass `--skip-python` / `-SkipPython` to skip the MT-server deps if you only want word lookups.
+
+### Manual
+
+```bash
+# Node side (Next.js, UI, API)
+npm install
+cp .env.local.example .env.local
+
+# Python side (MT server, optional but recommended)
+pip install -r requirements.txt
+```
+
+---
+
+## 🏃 Running
+
+```bash
+# Terminal 1 — translation server (first start downloads ~1.3 GB)
+npm run opus-mt
+
+# Terminal 2 — Next.js dev
 npm run dev
 ```
+
 Open [http://localhost:3000](http://localhost:3000).
 
-## 📁 Project Structure
+The MT server takes ~3 min on the first start (downloads NLLB-200 from Hugging Face and auto-converts it to a CTranslate2 INT8 model). Subsequent starts are ~5 seconds.
 
-- [`app/`](./app/) — Next.js App Router. `app/api/translate/route.ts` is the only API route.
-- [`components/translator.tsx`](./components/translator.tsx) — Client component, the entire UI.
-- [`lib/translate.ts`](./lib/translate.ts) — Detection, Kuroshiro/wanakana wrappers, LibreTranslate client, in-memory cache.
-- [`lib/seed-translations.ts`](./lib/seed-translations.ts) — Offline phrase dictionary fallback.
-- [`docs/`](./docs/) — Design spec ([`japanese_4way_translator_handoff.md`](./docs/japanese_4way_translator_handoff.md)) and timestamped session handoffs.
-- [`.claude/`](./.claude/) — Claude Code conventions and project-specific skills (token-saving, branching, docs workflow).
+---
 
-The [`.AI-Agents/`](./.AI-Agents/) directory contains earlier design notes about a multi-provider AI orchestrator. **That orchestrator is not part of this app** — the runtime is FOSS-only and uses no commercial LLM. The notes are kept as historical context.
+## 💡 How translation works
 
-## 💡 How It Works
+| Input shape | Path | Source of truth |
+|---|---|---|
+| Japanese with kanji/kana | Kuroshiro + Kuromoji generate hiragana + katakana + romaji from the input verbatim | in-process |
+| Romaji (ASCII) | wanakana converts to kana, then Kuroshiro re-derives romaji/katakana; rule-based fix applies particle exceptions (`wa→は`, `o→を`, `e→へ`) | in-process |
+| English, 1–3 words | Jisho.org JMdict API returns the JLPT-ranked common entry; Kuroshiro then expands kana/romaji | external HTTPS |
+| English, 4+ words | NLLB-200 (via local MT server) returns idiomatic Japanese; Kuroshiro expands kana/romaji | local HTTP |
 
-1. **Input** — User types or speaks text/audio.
-2. **Auto-detect** — Regex + heuristics classify the input as English, Romaji, or Japanese.
-3. **Normalize** — `String.normalize("NFKC")` and trim.
-4. **Convert** — Kuroshiro produces kana + romaji from any Japanese input; wanakana handles romaji → kana.
-5. **EN ⇄ JA** — Optional LibreTranslate call, otherwise the seed dictionary.
-6. **Cache** — In-memory LRU keyed on normalized input (max 500 entries, resets on server restart).
-7. **Display** — Five outputs in four cards (English, Japanese, Kana, Romaji) plus a TTS playback row.
+Input type is auto-detected. Ambiguous short ASCII inputs (e.g. `house` vs `ohayou`) trigger an async Jisho lookup to disambiguate.
+
+In-memory cache keyed on NFKC-normalized input: ~100 ms on a hit, 0.9–2 s on a cold sentence translation.
+
+---
 
 ## 🔌 API
 
-The app exposes one server route. You can use it independently of the UI.
+The Next app exposes one route. Use it standalone:
 
 ```
 POST /api/translate
 Content-Type: application/json
-{ "input": "<English | romaji | Japanese text>" }
+{ "input": "<English | romaji | Japanese>" }
 ```
 
 Returns:
+
 ```ts
 {
   english: string;
-  japanese: string;
-  kana: string;     // hiragana, no kanji
-  romaji: string;   // Hepburn
+  japanese: string;     // Hyōjungo, kanji+kana
+  hiragana: string;     // hiragana only
+  katakana: string;     // katakana only
+  kana: string;         // legacy alias for hiragana
+  romaji: string;       // Hepburn
   meta: {
     detected: "english" | "romaji" | "japanese";
     confidence: number;       // 0..1
-    provider: string;         // e.g. "kuroshiro+libretranslate" or "kuroshiro+seed-dict(152)"
+    provider: string;         // e.g. "kuroshiro+jisho(common)", "kuroshiro+mt-server"
     cached: boolean;
     notes?: string[];
   };
 }
 ```
 
-`GET /api/translate` returns a small health JSON.
+`GET /api/translate` is a healthcheck. The MT server (`:5001`) exposes the same `/translate` shape as LibreTranslate, so you can swap it for any LibreTranslate-compatible backend.
 
-## 🧠 Browser audio support
+---
 
-- **Speech-in (mic button)** uses `window.SpeechRecognition` with `lang="ja-JP"`. Currently supported in Chrome and Edge; Firefox/Safari users see a clear "unsupported" message.
-- **Speech-out (Play button)** uses `window.speechSynthesis.speak()` with `lang="ja-JP"`. Voice quality varies by OS — best on macOS (Kyoko) and recent Windows (Haruka / Nanami).
+## 📁 Project structure
 
-## 🔐 Environment & secrets
+| Path | Purpose |
+|---|---|
+| [`app/`](./app/) | Next.js App Router. `app/api/translate/route.ts` is the only server route. |
+| [`components/translator.tsx`](./components/translator.tsx) | Client component — the entire UI. |
+| [`lib/translate.ts`](./lib/translate.ts) | Detection, Kuroshiro/wanakana glue, MT-server client, in-memory cache. |
+| [`lib/dictionary.ts`](./lib/dictionary.ts) | Jisho.org API client with JLPT-aware ranking and async tiebreaker. |
+| [`scripts/mt_server.py`](./scripts/mt_server.py) | NLLB-200 CT2 translation server (FastAPI). |
+| [`requirements.txt`](./requirements.txt) | Python deps for the MT server. |
+| [`install.sh`](./install.sh) / [`install.ps1`](./install.ps1) | One-shot setup. |
+| [`docs/`](./docs/) | Design spec + per-session handoff snapshots. |
+| [`.claude/`](./.claude/) | Claude Code conventions and project skills (token-saving, branching, docs). |
+| [`.AI-Agents/`](./.AI-Agents/) | Historical multi-provider design notes — **not** wired into the app. |
 
-Runtime needs no secrets. The only optional variable is `LIBRETRANSLATE_URL` (see [`.env.local.example`](./.env.local.example)). The repo's `.gitignore` already excludes `.env.local` and `.credentials/`.
+---
 
-## 📁 Historical context
+## ⚡ Translation quality vs. speed
 
-The [`.AI-Agents/`](./.AI-Agents/) directory contains notes from an earlier design pass that envisioned multi-provider AI orchestration (Claude, OpenAI, Gemini, NVIDIA). **That code does not exist in this app** and the runtime never calls any commercial LLM. The notes are preserved as historical record of design exploration; they are not load-bearing for the running product.
+The MT server's default `MODEL_NAME` is `facebook/nllb-200-distilled-600M` (CC-BY-NC 4.0). For commercial use, change it in [`scripts/mt_server.py`](./scripts/mt_server.py) and convert your replacement:
 
-For the active spec, see [`docs/japanese_4way_translator_handoff.md`](./docs/japanese_4way_translator_handoff.md). For Claude Code conventions used during development, see [`CLAUDE.md`](./CLAUDE.md) and [`.claude/CLAUDE.md`](./.claude/CLAUDE.md).
+| Model | License | Quality | Approx size | Notes |
+|---|---|---|---|---|
+| **NLLB-200 distilled-600M (default)** | CC-BY-NC 4.0 | Best for short sentences | 1.3 GB raw / 600 MB INT8 | Multi-lingual but tuned to handle EN↔JA well |
+| `staka/fugumt-en-ja` + `staka/fugumt-ja-en` | Apache 2.0 | Good, sometimes drops proper nouns | ~290 MB each | Pair of single-direction models |
+| `Helsinki-NLP/opus-mt-en-jap` + `opus-mt-ja-en` | Apache 2.0 | Lower (2019 release) | ~290 MB each | Last-resort commercial option |
+
+Measured latency on a typical dev laptop (no GPU):
+
+| Path | Latency |
+|---|---|
+| Cache hit | ~100 ms |
+| Word lookup (Jisho HTTPS) | 200–500 ms |
+| Sentence (NLLB-200 CT2 INT8) | 0.9–2 s |
+| Sentence (NLLB-200 PyTorch FP32, pre-optimization baseline) | 7–10 s |
+
+---
+
+## 🧠 Browser audio
+
+- **Mic input** uses `window.SpeechRecognition` with `lang="ja-JP"`. Currently supported in Chrome and Edge; Firefox/Safari users see a clear "unsupported" message.
+- **TTS playback** uses `window.speechSynthesis.speak()` with `lang="ja-JP"`. Voice quality varies by OS — best on macOS (Kyoko) and recent Windows (Haruka / Nanami).
+
+---
+
+## 🔐 Environment
+
+The only env var the app reads is `LIBRETRANSLATE_URL`, set in `.env.local`. Default: `http://localhost:5001` (the bundled NLLB server). Point it at any LibreTranslate-compatible `/translate` endpoint if you want a different backend.
+
+No commercial API keys are required at runtime. Files in this repo named `*_API_KEY` (Claude, OpenAI, Gemini, NVIDIA) are vestigial from earlier design exploration and **not used by the app** — see `.AI-Agents/` for historical context.
+
+---
+
+## 🧹 Disk cleanup after first install
+
+After the first `npm run opus-mt`, two model copies sit in your HF cache:
+
+- `~/.cache/huggingface/hub/models--facebook--nllb-200-distilled-600M/` (~1.3 GB) — original PyTorch weights, only needed for the one-time CT2 conversion.
+- `~/.cache/nllb-200-ct2-int8/` (~600 MB) — the converted model the server actually uses.
+
+Once the CT2 model exists, the PyTorch copy can be deleted to reclaim ~1.3 GB. The tokenizer files inside the HF cache (~10 MB) are still needed; deleting the whole `models--facebook--nllb-200-distilled-600M/snapshots/.../model.safetensors*` is the safer surgical option.
+
+---
+
+## 🛠 Development conventions
+
+This repo uses [Claude Code](https://claude.com/claude-code) conventions:
+
+- **Branching:** one feature branch per task, named `<type>/<short-kebab>` where `type ∈ {feat, fix, docs, chore, refactor, test, perf}`. See `.claude/skills/new-task-branch/`.
+- **Token-saving:** all shell commands are prefixed with [`rtk`](https://github.com/rtk-ai/rtk) to compress tool output by 60-90% before it reaches the model context. See `.claude/CLAUDE.md`.
+- **Docs sync:** README + CHANGELOG + `.claude/CLAUDE.md` stay aligned per the `docs` skill.
+
+For contributors, see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+---
+
+## 📜 Licenses
+
+- This project: see [`LICENSE`](./LICENSE) if present, otherwise contact the repo owner.
+- Kuroshiro, Kuromoji, wanakana, sentencepiece: MIT / Apache 2.0.
+- Jisho.org's JMdict data: CC BY-SA 4.0 (data); API usage is free for non-abusive personal/educational traffic.
+- NLLB-200 weights: CC-BY-NC 4.0 (non-commercial). See "Translation quality vs. speed" above for Apache-2.0 alternatives.
+- LibreTranslate (alternative backend): AGPLv3.
+
+---
 
 ## 🚀 Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The Next.js app deploys on Vercel out of the box. The MT server does not — it needs ~600 MB of model state and a persistent Python process, neither of which fits a serverless function. For a production deploy, host the MT server on a small VM (1 vCPU + 2 GB RAM suffices) and set `LIBRETRANSLATE_URL` in Vercel env to point at it.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See [Next.js deployment docs](https://nextjs.org/docs/app/building-your-application/deploying) for the app side.
