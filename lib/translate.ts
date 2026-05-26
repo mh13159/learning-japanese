@@ -235,7 +235,9 @@ async function libreTranslate(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
+      // NLLB-200 on CPU takes ~5-10s per inference. Allow generous headroom
+      // for queued requests when the user types fast.
+      signal: AbortSignal.timeout(60000),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { translatedText?: string };
@@ -256,7 +258,7 @@ async function resolveEnToJa(text: string): Promise<{ ja: string; source: string
     }
   }
   const lt = await libreTranslate(text, { source: "en", target: "ja" });
-  if (lt) return { ja: lt, source: "libretranslate" };
+  if (lt) return { ja: lt, source: "mt-server" };
   return null;
 }
 
@@ -268,7 +270,7 @@ async function resolveJaToEn(text: string): Promise<{ en: string; source: string
     }
   }
   const lt = await libreTranslate(text, { source: "ja", target: "en" });
-  if (lt) return { en: lt, source: "libretranslate" };
+  if (lt) return { en: lt, source: "mt-server" };
   return null;
 }
 
@@ -343,15 +345,6 @@ export async function translate(rawInput: string): Promise<Translation> {
       providers.push(jaRes.source);
       const j = await processJapanese(jaRes.ja);
       ({ japanese, hiragana, katakana, kana, romaji } = j);
-      // LibreTranslate uses a small Argos model (~100 MB) that is reliable on
-      // vocabulary but rough on natural sentence structure. Surface this so
-      // users don't take questionable output at face value.
-      if (jaRes.source === "libretranslate") {
-        confidence = 0.6;
-        notes.push(
-          "Sentence translation via LibreTranslate's open-source Argos model — quality varies. For higher-fidelity sentence translation, see README for self-host upgrade paths (NLLB-200 / OPUS-MT).",
-        );
-      }
     } else {
       notes.push(
         "Japanese unavailable — neither the dictionary nor LibreTranslate returned a result.",

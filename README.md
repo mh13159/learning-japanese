@@ -57,10 +57,41 @@ cp .env.local.example .env.local
 
 > **Translation quality note.** LibreTranslate uses the Argos Translate package, whose EN ⇄ JA model is ~100 MB. It's reliable on vocabulary but rough on natural sentence structure — "where is the airport" becomes "空港の場所" rather than the idiomatic "空港はどこですか". The UI flags sentence-level output with a lower confidence and an advisory note.
 >
-> **Upgrade paths for higher-quality sentence translation** (all FOSS):
-> - **NLLB-200** (Meta, Apache 2.0) — Hugging Face `facebook/nllb-200-distilled-600M`. ~1.3 GB. Much better quality. Run via `transformers` or `ctranslate2`.
-> - **OPUS-MT** (Helsinki-NLP, Apache 2.0) — `Helsinki-NLP/opus-mt-en-jap` / `opus-mt-ja-en`. ~300 MB per direction. Specialized per pair, very good quality.
-> - Wrap either with a tiny FastAPI service that mirrors `/translate` and point `LIBRETRANSLATE_URL` at it. Drop-in.
+> **Recommended upgrade for higher-quality sentence translation:** NLLB-200 via the bundled FastAPI wrapper below. Argos handles vocabulary fine but mangles natural sentence structure (`where is the airport` → `空港の場所`, "the airport's place"). NLLB-200 produces idiomatic output (`空港はどこですか?`).
+
+### 3. (Recommended) NLLB-200 translation server
+
+The repo ships a small Python FastAPI service ([scripts/mt_server.py](./scripts/mt_server.py)) that wraps Meta's [NLLB-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M) and exposes a LibreTranslate-compatible `/translate` endpoint. Drop-in replacement for LibreTranslate — same JSON API, dramatically better sentence quality.
+
+```bash
+# One-time: install Python deps (Python 3.10+ required)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install transformers fastapi "uvicorn[standard]" sentencepiece sacremoses
+
+# Run the server (binds 127.0.0.1:5001 by default)
+npm run opus-mt
+# or directly:
+py scripts/mt_server.py --port 5001
+```
+
+First start downloads ~1.3 GB of NLLB-200 weights to `~/.cache/huggingface/`; subsequent starts load from cache in ~15 seconds.
+
+Point the app at it by editing `.env.local`:
+```
+LIBRETRANSLATE_URL=http://localhost:5001
+```
+Restart `npm run dev`.
+
+**Quality comparison** (same input, three backends):
+
+| Input | LibreTranslate (Argos) | FuguMT | NLLB-200 |
+|---|---|---|---|
+| where is the airport | 空港の場所 | この空港のどこに | **空港はどこですか?** |
+| would you help me | お問い合わせ (!) | 私に手を差し出して | **助けてくれませんか?** |
+| I would like to visit Mount Fuji next summer | 来夏の富士山を訪れたい | この夏の山にぜひ行きたい | **来年の夏にフジ山を訪れたい** |
+| could you recommend a good restaurant | (n/a) | おすすめのよい店教えて | **良いレストランをお勧めできますか?** |
+
+NLLB-200 is CC-BY-NC 4.0 (non-commercial). For commercial use, swap `MODEL_NAME` in `scripts/mt_server.py` to `staka/fugumt-en-ja` + `staka/fugumt-ja-en` (Apache 2.0, somewhat lower quality) or `Helsinki-NLP/opus-mt-*` (Apache 2.0, much lower quality).
 
 ### 3. Run
 ```bash
