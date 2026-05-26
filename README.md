@@ -66,15 +66,24 @@ The repo ships a small Python FastAPI service ([scripts/mt_server.py](./scripts/
 ```bash
 # One-time: install Python deps (Python 3.10+ required)
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install transformers fastapi "uvicorn[standard]" sentencepiece sacremoses
+pip install transformers ctranslate2 fastapi "uvicorn[standard]" sentencepiece sacremoses
 
 # Run the server (binds 127.0.0.1:5001 by default)
 npm run opus-mt
 # or directly:
-py scripts/mt_server.py --port 5001
+py scripts/mt_server.py --port 5001          # default beam_size=2 (recommended)
+py scripts/mt_server.py --beam-size 1        # greedy decoding, slightly faster, marginal quality drop
 ```
 
-First start downloads ~1.3 GB of NLLB-200 weights to `~/.cache/huggingface/`; subsequent starts load from cache in ~15 seconds.
+First start downloads ~1.3 GB of NLLB-200 weights to `~/.cache/huggingface/` and **auto-converts** them to a CTranslate2 INT8 model at `~/.cache/nllb-200-ct2-int8/` (3-5 min, ~600 MB on disk). Subsequent starts load the CT2 model in ~5 seconds.
+
+**Why CTranslate2 INT8?** ~8x faster CPU inference than raw `transformers` + PyTorch on the same model, with virtually identical quality. Measured on this app:
+
+| Path | Mean latency per sentence |
+|---|---|
+| PyTorch FP32 (initial) | 7–10 s |
+| **CTranslate2 INT8 (current)** | **0.9–2 s** |
+| Cache hit (in-memory) | ~100 ms |
 
 Point the app at it by editing `.env.local`:
 ```
