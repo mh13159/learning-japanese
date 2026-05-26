@@ -8,6 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 type Translation = {
   english: string;
   japanese: string;
+  hiragana: string;
+  katakana: string;
   kana: string;
   romaji: string;
   meta: {
@@ -22,6 +24,8 @@ type Translation = {
 const EMPTY: Translation = {
   english: "",
   japanese: "",
+  hiragana: "",
+  katakana: "",
   kana: "",
   romaji: "",
   meta: { detected: "english", confidence: 0, provider: "none", cached: false },
@@ -202,7 +206,7 @@ export function Translator() {
           </div>
         ))}
 
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
           <OutputCard
             label="English"
             chip="EN"
@@ -226,14 +230,25 @@ export function Translator() {
             textClass="text-2xl leading-relaxed"
           />
           <OutputCard
-            label="Kana"
-            chip="か"
+            label="Hiragana"
+            chip="あ"
             chipClass="bg-primary/10 text-primary"
-            value={result.kana}
+            value={result.hiragana}
             loading={loading}
             placeholder="ひらがなで表示されます…"
-            onCopy={() => handleCopy(result.kana, "kana")}
-            copied={copiedField === "kana"}
+            onCopy={() => handleCopy(result.hiragana, "hiragana")}
+            copied={copiedField === "hiragana"}
+            textClass="text-2xl leading-relaxed"
+          />
+          <OutputCard
+            label="Katakana"
+            chip="ア"
+            chipClass="bg-primary/10 text-primary"
+            value={result.katakana}
+            loading={loading}
+            placeholder="カタカナで表示されます…"
+            onCopy={() => handleCopy(result.katakana, "katakana")}
+            copied={copiedField === "katakana"}
             textClass="text-2xl leading-relaxed"
           />
           <OutputCard

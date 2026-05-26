@@ -13,6 +13,9 @@ export type DetectedType = "english" | "romaji" | "japanese";
 export type Translation = {
   english: string;
   japanese: string;
+  hiragana: string;
+  katakana: string;
+  /** @deprecated kept for backward compat — equals `hiragana` */
   kana: string;
   romaji: string;
   meta: {
@@ -177,11 +180,12 @@ function fixRomajiParticleKana(kana: string, originalRomaji: string): string {
 
 async function processJapanese(text: string) {
   const k = await getKuroshiro();
-  const [kana, romaji] = await Promise.all([
+  const [hiragana, katakana, romaji] = await Promise.all([
     k.convert(text, { to: "hiragana" }),
+    k.convert(text, { to: "katakana" }),
     k.convert(text, { to: "romaji", romajiSystem: "hepburn" }),
   ]);
-  return { japanese: text, kana, romaji };
+  return { japanese: text, hiragana, katakana, kana: hiragana, romaji };
 }
 
 async function processRomaji(originalRomaji: string) {
@@ -191,8 +195,18 @@ async function processRomaji(originalRomaji: string) {
   // (e.g. trailing punctuation that survived).
   const kanaOnly = kana.replace(/[A-Za-z]/g, "");
   const k = await getKuroshiro();
-  const standardRomaji = await k.convert(kanaOnly, { to: "romaji", romajiSystem: "hepburn" });
-  return { japanese: kanaOnly, kana: kanaOnly, romaji: standardRomaji || originalRomaji };
+  const [hiragana, katakana, standardRomaji] = await Promise.all([
+    k.convert(kanaOnly, { to: "hiragana" }),
+    k.convert(kanaOnly, { to: "katakana" }),
+    k.convert(kanaOnly, { to: "romaji", romajiSystem: "hepburn" }),
+  ]);
+  return {
+    japanese: kanaOnly,
+    hiragana,
+    katakana,
+    kana: hiragana,
+    romaji: standardRomaji || originalRomaji,
+  };
 }
 
 type LibreTranslateOptions = {
@@ -267,6 +281,8 @@ export async function translate(rawInput: string): Promise<Translation> {
     return {
       english: "",
       japanese: "",
+      hiragana: "",
+      katakana: "",
       kana: "",
       romaji: "",
       meta: { detected: "english", confidence: 0, provider: "none", cached: false },
@@ -289,13 +305,15 @@ export async function translate(rawInput: string): Promise<Translation> {
 
   let english = "";
   let japanese = "";
+  let hiragana = "";
+  let katakana = "";
   let kana = "";
   let romaji = "";
   let confidence = 0.9;
 
   if (detected === "japanese") {
     const j = await processJapanese(normalized);
-    ({ japanese, kana, romaji } = j);
+    ({ japanese, hiragana, katakana, kana, romaji } = j);
     const enRes = await resolveJaToEn(japanese);
     if (enRes) {
       english = enRes.en;
@@ -307,7 +325,7 @@ export async function translate(rawInput: string): Promise<Translation> {
     }
   } else if (detected === "romaji") {
     const j = await processRomaji(normalized);
-    ({ japanese, kana, romaji } = j);
+    ({ japanese, hiragana, katakana, kana, romaji } = j);
     providers.push("wanakana");
     confidence = 0.75;
     const enRes = await resolveJaToEn(japanese);
@@ -324,7 +342,7 @@ export async function translate(rawInput: string): Promise<Translation> {
     if (jaRes) {
       providers.push(jaRes.source);
       const j = await processJapanese(jaRes.ja);
-      ({ japanese, kana, romaji } = j);
+      ({ japanese, hiragana, katakana, kana, romaji } = j);
       // LibreTranslate uses a small Argos model (~100 MB) that is reliable on
       // vocabulary but rough on natural sentence structure. Surface this so
       // users don't take questionable output at face value.
@@ -345,6 +363,8 @@ export async function translate(rawInput: string): Promise<Translation> {
   const result: Translation = {
     english,
     japanese,
+    hiragana,
+    katakana,
     kana,
     romaji,
     meta: {
