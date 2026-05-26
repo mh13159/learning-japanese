@@ -322,7 +322,7 @@ export async function translate(rawInput: string): Promise<Translation> {
       providers.push(enRes.source);
     } else {
       notes.push(
-        "English unavailable — neither the dictionary nor LibreTranslate returned a result.",
+        "English unavailable — neither the dictionary nor the MT server (LIBRETRANSLATE_URL) returned a result. Check that scripts/mt_server.py is running, or retry — it may have been a transient timeout.",
       );
     }
   } else if (detected === "romaji") {
@@ -347,7 +347,7 @@ export async function translate(rawInput: string): Promise<Translation> {
       ({ japanese, hiragana, katakana, kana, romaji } = j);
     } else {
       notes.push(
-        "Japanese unavailable — neither the dictionary nor LibreTranslate returned a result.",
+        "Japanese unavailable — neither the dictionary nor the MT server (LIBRETRANSLATE_URL) returned a result. Check that scripts/mt_server.py is running, or retry — it may have been a transient timeout.",
       );
       confidence = 0.3;
     }
@@ -369,10 +369,21 @@ export async function translate(rawInput: string): Promise<Translation> {
     },
   };
 
-  if (memCache.size >= MAX_CACHE) {
-    const firstKey = memCache.keys().next().value;
-    if (firstKey) memCache.delete(firstKey);
+  // Only cache successful translations. A response that produced no Japanese
+  // output (dictionary miss + MT server unavailable / timed out) should not
+  // be sticky — the user should be able to retry once the underlying issue
+  // is resolved.
+  const isSuccess =
+    detected === "japanese"
+      ? !!japanese && (!!english || !process.env.LIBRETRANSLATE_URL)
+      : !!japanese && !!hiragana;
+
+  if (isSuccess) {
+    if (memCache.size >= MAX_CACHE) {
+      const firstKey = memCache.keys().next().value;
+      if (firstKey) memCache.delete(firstKey);
+    }
+    memCache.set(normalized, result);
   }
-  memCache.set(normalized, result);
   return result;
 }
