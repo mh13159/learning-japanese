@@ -354,7 +354,9 @@ function OutputCard({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <div className={`min-h-[80px] text-foreground ${textClass}`}>
+        <div
+          className={`min-h-[80px] text-foreground break-words [overflow-wrap:anywhere] ${textClass}`}
+        >
           {loading && !value ? (
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           ) : value ? (
