@@ -1,92 +1,115 @@
 """
-Translation server — Meta's NLLB-200 distilled-600M.
+Translation server — Meta's NLLB-200-distilled-600M via CTranslate2 (INT8).
 
-Mirrors the subset of the LibreTranslate JSON API the app needs, so it's
-a drop-in replacement: set LIBRETRANSLATE_URL to this server's address.
+CTranslate2 + INT8 quantization typically delivers a 3-5x CPU-inference
+speedup over raw PyTorch transformers and roughly halves memory. Output
+quality is virtually unchanged for sentence translation.
 
-NLLB-200 is one model that handles both EN<->JA (and 200+ other pairs).
-~1.3 GB on disk after download. CPU inference works but is ~2-5s per
-sentence on a modern laptop — acceptable for an interactive translator.
+Exposes a LibreTranslate-compatible /translate endpoint so it's a
+drop-in replacement: set LIBRETRANSLATE_URL to this server's URL.
 
-The previous version of this script used Helsinki-NLP/opus-mt-en-jap
-(stale 2019 model, mangled outputs) and then staka/fugumt-en-ja (newer
-but drops proper nouns like "Mount Fuji" → just "山"). Both were inferior
-to NLLB-200 on the QA corpus.
+First run requires a one-time conversion (a few minutes); this script
+auto-converts on startup if the CT2 directory is missing. To trigger
+it manually:
+    py -m ctranslate2.converters.transformers \\
+        --model facebook/nllb-200-distilled-600M \\
+        --output_dir ~/.cache/nllb-200-ct2-int8 --quantization int8
 
 Usage:
-    py scripts/opus_mt_server.py           # binds 127.0.0.1:5001
-    py scripts/opus_mt_server.py --port 5002
+    py scripts/mt_server.py                  # binds 127.0.0.1:5001
+    py scripts/mt_server.py --port 5002
+    py scripts/mt_server.py --beam-size 1    # greedy decoding, faster
 
 Endpoints:
     GET  /            healthcheck
     GET  /languages   list of {code, name, targets} matching LibreTranslate's shape
     POST /translate   { q, source, target, format? } -> { translatedText }
 
-License: this script is part of this repo. NLLB-200 is CC-BY-NC 4.0.
-For commercial use, swap MODEL_NAME for an Apache-2.0 alternative
-(e.g. staka/fugumt-* or Helsinki-NLP/opus-mt-* — see git history).
+License: this script is part of this repo (its license). NLLB-200 is
+CC-BY-NC 4.0 (non-commercial). For commercial use, convert a different
+model — staka/fugumt-* or Helsinki-NLP/opus-mt-* are Apache 2.0.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 
+import ctranslate2
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("nllb")
+log = logging.getLogger("mt")
 
-MODEL_NAME = "facebook/nllb-200-distilled-600M"
+HF_MODEL = "facebook/nllb-200-distilled-600M"
+DEFAULT_CT2_DIR = Path.home() / ".cache" / "nllb-200-ct2-int8"
 
-# NLLB uses BCP-47-ish "<iso639-3>_<script>" language codes.
+# NLLB BCP-47-ish language codes.
 LANG_CODE = {
     "en": "eng_Latn",
     "ja": "jpn_Jpan",
 }
 
-# Populated by lifespan startup.
+_translator: ctranslate2.Translator | None = None
 _tokenizer: AutoTokenizer | None = None
-_model: AutoModelForSeq2SeqLM | None = None
+_beam_size: int = 2
+
+
+def _ensure_ct2_model(ct2_dir: Path) -> None:
+    """If the converted model is missing, run the conversion now."""
+    if (ct2_dir / "model.bin").exists():
+        return
+    log.info("CT2 model not found at %s — converting from %s (one-time)", ct2_dir, HF_MODEL)
+    from ctranslate2.converters.transformers import TransformersConverter
+
+    ct2_dir.parent.mkdir(parents=True, exist_ok=True)
+    converter = TransformersConverter(HF_MODEL)
+    converter.convert(str(ct2_dir), quantization="int8", force=True)
+    log.info("Conversion done.")
 
 
 def _translate(text: str, source: str, target: str) -> str:
-    assert _tokenizer is not None and _model is not None
+    assert _translator is not None and _tokenizer is not None
     src = LANG_CODE.get(source)
     tgt = LANG_CODE.get(target)
     if not src or not tgt:
         raise HTTPException(status_code=400, detail=f"Unsupported language pair: {source}->{target}")
 
     _tokenizer.src_lang = src
-    inputs = _tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-    forced_bos = _tokenizer.convert_tokens_to_ids(tgt)
-    out = _model.generate(
-        **inputs,
-        forced_bos_token_id=forced_bos,
-        max_length=512,
-        num_beams=5,
-        no_repeat_ngram_size=3,
+    source_tokens = _tokenizer.convert_ids_to_tokens(_tokenizer.encode(text))
+    target_prefix = [tgt]
+    result = _translator.translate_batch(
+        [source_tokens],
+        target_prefix=[target_prefix],
+        beam_size=_beam_size,
+        max_decoding_length=512,
     )
-    return _tokenizer.batch_decode(out, skip_special_tokens=True)[0]
+    target_tokens = result[0].hypotheses[0][1:]  # drop the language prefix token
+    return _tokenizer.decode(_tokenizer.convert_tokens_to_ids(target_tokens), skip_special_tokens=True)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _tokenizer, _model
-    log.info("Loading %s ...", MODEL_NAME)
-    _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    _model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-    _model.eval()
-    log.info("Ready on /translate")
+    global _translator, _tokenizer
+    ct2_dir = Path(os.environ.get("NLLB_CT2_DIR", DEFAULT_CT2_DIR))
+    _ensure_ct2_model(ct2_dir)
+    log.info("Loading CT2 model from %s (compute_type=int8, beam_size=%d) ...", ct2_dir, _beam_size)
+    t0 = time.time()
+    _translator = ctranslate2.Translator(str(ct2_dir), device="cpu", compute_type="int8")
+    _tokenizer = AutoTokenizer.from_pretrained(HF_MODEL)
+    log.info("Ready on /translate in %.1fs", time.time() - t0)
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="NLLB-200 translation server")
+app = FastAPI(lifespan=lifespan, title="NLLB-200 CT2 translation server")
 
 
 class TranslateRequest(BaseModel):
@@ -104,7 +127,12 @@ class TranslateResponse(BaseModel):
 
 @app.get("/")
 def root() -> dict:
-    return {"ok": True, "service": "nllb-200", "model": MODEL_NAME}
+    return {
+        "ok": True,
+        "service": "nllb-200-ct2",
+        "model": HF_MODEL,
+        "beam_size": _beam_size,
+    }
 
 
 @app.get("/languages")
@@ -133,10 +161,13 @@ def translate(req: TranslateRequest) -> TranslateResponse:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="NLLB-200 EN<->JA translation server")
+    global _beam_size
+    parser = argparse.ArgumentParser(description="NLLB-200 (CTranslate2 INT8) translation server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5001)
+    parser.add_argument("--beam-size", type=int, default=2, help="1=greedy (fastest), higher=better quality")
     args = parser.parse_args()
+    _beam_size = args.beam_size
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

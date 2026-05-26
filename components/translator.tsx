@@ -50,12 +50,17 @@ export function Translator() {
       return;
     }
 
+    // Cancel any in-flight request and clear stale output immediately so the
+    // user doesn't see the previous query's translation while waiting for
+    // the new one. Loading spinners appear in each card.
+    abortRef.current?.abort();
+    setLoading(true);
+    setError(null);
+    setResult(EMPTY);
+
     const handle = setTimeout(async () => {
-      abortRef.current?.abort();
       const ctrl = new AbortController();
       abortRef.current = ctrl;
-      setLoading(true);
-      setError(null);
       try {
         const res = await fetch("/api/translate", {
           method: "POST",
@@ -68,15 +73,15 @@ export function Translator() {
           throw new Error(body.error || `Request failed: ${res.status}`);
         }
         const data = (await res.json()) as Translation;
+        if (ctrl.signal.aborted) return;
         setResult(data);
       } catch (e) {
         if ((e as Error).name === "AbortError") return;
         setError((e as Error).message);
-        setResult(EMPTY);
       } finally {
-        setLoading(false);
+        if (!ctrl.signal.aborted) setLoading(false);
       }
-    }, 400);
+    }, 700);
 
     return () => clearTimeout(handle);
   }, [inputText]);
