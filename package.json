@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "opus-mt": "py scripts/mt_server.py",
+    "translation-server": "py scripts/mt_server.py"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",
