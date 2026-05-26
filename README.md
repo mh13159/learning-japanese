@@ -33,14 +33,14 @@ cd learning-japanese
 npm install
 ```
 
-### 2. (Optional) Enable open-vocabulary EN ⇄ JA
+### 2. EN ⇄ JA translation
 
-Without this step, EN ⇄ JA falls back to a 152-entry phrase dictionary that covers greetings, common questions, JLPT N5 vocab, and travel basics. Japanese ⇄ kana ⇄ romaji is fully functional offline regardless.
+**Vocabulary lookups** (1–3 word inputs) hit Jisho.org's public JMdict-backed API directly — no setup required, no key. You can type "good", "umbrella", "fish", etc. and get an accurate Japanese answer.
 
-For unbounded EN ⇄ JA, self-host LibreTranslate:
+**Sentence translation** requires a self-hosted LibreTranslate (or compatible) endpoint. Without it, sentence input falls back to a note explaining how to enable it.
 
 ```bash
-# Docker (recommended)
+# Docker (recommended, what this repo's dev uses)
 docker run -d --name libretranslate -p 5000:5000 \
   libretranslate/libretranslate --load-only en,ja
 
@@ -54,6 +54,13 @@ Then:
 cp .env.local.example .env.local
 # .env.local already has LIBRETRANSLATE_URL=http://localhost:5000
 ```
+
+> **Translation quality note.** LibreTranslate uses the Argos Translate package, whose EN ⇄ JA model is ~100 MB. It's reliable on vocabulary but rough on natural sentence structure — "where is the airport" becomes "空港の場所" rather than the idiomatic "空港はどこですか". The UI flags sentence-level output with a lower confidence and an advisory note.
+>
+> **Upgrade paths for higher-quality sentence translation** (all FOSS):
+> - **NLLB-200** (Meta, Apache 2.0) — Hugging Face `facebook/nllb-200-distilled-600M`. ~1.3 GB. Much better quality. Run via `transformers` or `ctranslate2`.
+> - **OPUS-MT** (Helsinki-NLP, Apache 2.0) — `Helsinki-NLP/opus-mt-en-jap` / `opus-mt-ja-en`. ~300 MB per direction. Specialized per pair, very good quality.
+> - Wrap either with a tiny FastAPI service that mirrors `/translate` and point `LIBRETRANSLATE_URL` at it. Drop-in.
 
 ### 3. Run
 ```bash

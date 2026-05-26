@@ -76,30 +76,51 @@ function remember(key: string, value: DictResult): DictResult {
   return value;
 }
 
+// JLPT level → numeric rank (lower = more common). N5 is everyday vocab,
+// N1 is advanced. Unranked entries are pushed to the back.
+function jlptRank(e: JishoEntry): number {
+  const tags = e.jlpt ?? [];
+  for (let n = 5; n >= 1; n--) {
+    if (tags.some((t) => t.toLowerCase() === `jlpt-n${n}`)) return 6 - n;
+  }
+  return 99;
+}
+
+function hasExactGloss(e: JishoEntry, target: string): boolean {
+  for (const s of e.senses ?? []) {
+    for (const d of s.english_definitions ?? []) {
+      if (normalize(d) === target) return true;
+      // Some definitions are like "dog (Canis (lupus) familiaris)" — strip
+      // parenthesized clarifications and re-check.
+      const stripped = normalize(d).replace(/\s*\([^)]*\)/g, "").trim();
+      if (stripped === target) return true;
+    }
+  }
+  return false;
+}
+
 function pickBestEntry(entries: JishoEntry[], targetGloss: string): JishoEntry | null {
   if (entries.length === 0) return null;
   const target = normalize(targetGloss);
 
-  // 1. Strongest match: is_common AND english_definitions contains the exact target.
-  for (const e of entries) {
-    if (!e.is_common) continue;
-    for (const s of e.senses ?? []) {
-      for (const d of s.english_definitions ?? []) {
-        if (normalize(d) === target) return e;
-      }
-    }
+  // 1. is_common AND exact gloss match → strongest signal.
+  const commonExact = entries.filter((e) => e.is_common && hasExactGloss(e, target));
+  if (commonExact.length > 0) {
+    commonExact.sort((a, b) => jlptRank(a) - jlptRank(b));
+    return commonExact[0];
   }
   // 2. Any entry with an exact gloss match.
-  for (const e of entries) {
-    for (const s of e.senses ?? []) {
-      for (const d of s.english_definitions ?? []) {
-        if (normalize(d) === target) return e;
-      }
-    }
+  const anyExact = entries.filter((e) => hasExactGloss(e, target));
+  if (anyExact.length > 0) {
+    anyExact.sort((a, b) => jlptRank(a) - jlptRank(b));
+    return anyExact[0];
   }
-  // 3. First common entry.
-  const common = entries.find((e) => e.is_common);
-  if (common) return common;
+  // 3. Common entries ranked by JLPT level (N5 first).
+  const common = entries.filter((e) => e.is_common);
+  if (common.length > 0) {
+    common.sort((a, b) => jlptRank(a) - jlptRank(b));
+    return common[0];
+  }
   // 4. First entry, period.
   return entries[0];
 }
@@ -141,11 +162,7 @@ export async function lookupEnglishWord(en: string): Promise<DictResult | null> 
 
   // Require the matched entry's gloss to actually contain the input — guard against
   // jisho returning loose matches for unfamiliar input.
-  const allGlosses = (entry.senses ?? [])
-    .flatMap((s) => s.english_definitions ?? [])
-    .map(normalize);
-  const matches = allGlosses.some((g) => g === stripped || g.split(/[,;] ?/).includes(stripped));
-  if (!matches) return rememberMiss(key);
+  if (!hasExactGloss(entry, stripped)) return rememberMiss(key);
 
   return remember(key, result);
 }

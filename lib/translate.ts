@@ -325,6 +325,15 @@ export async function translate(rawInput: string): Promise<Translation> {
       providers.push(jaRes.source);
       const j = await processJapanese(jaRes.ja);
       ({ japanese, kana, romaji } = j);
+      // LibreTranslate uses a small Argos model (~100 MB) that is reliable on
+      // vocabulary but rough on natural sentence structure. Surface this so
+      // users don't take questionable output at face value.
+      if (jaRes.source === "libretranslate") {
+        confidence = 0.6;
+        notes.push(
+          "Sentence translation via LibreTranslate's open-source Argos model — quality varies. For higher-fidelity sentence translation, see README for self-host upgrade paths (NLLB-200 / OPUS-MT).",
+        );
+      }
     } else {
       notes.push(
         "Japanese unavailable — neither the dictionary nor LibreTranslate returned a result.",
